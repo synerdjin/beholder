@@ -95,25 +95,7 @@ final class TopView: @unchecked Sendable {
         }
         output += "\n"
 
-        output +=
-            Column.left("PROCESS", 22) + Column.right("PID", 7) + "  "
-            + Column.left("PROTO", 6) + Column.left("REMOTE", 40)
-            + Column.right("UP", 11) + Column.right("DOWN", 11) + "  "
-            + "STATE\n"
-
-        for flow in flows {
-            let remote = "\(flow.key.remote):\(flow.key.remotePort)"
-            let state = flow.tcpState.map(String.init(describing:))
-                ?? (flow.key.transport == .udp ? "—" : "")
-            output +=
-                Column.left(flow.owner?.name ?? "(unknown)", 22)
-                + Column.right(flow.owner.map { String($0.pid) } ?? "—", 7) + "  "
-                + Column.left(flow.key.transport.name, 6)
-                + Column.left(remote, 40)
-                + Column.right(formatBytes(Double(flow.bytesOut)), 11)
-                + Column.right(formatBytes(Double(flow.bytesIn)), 11) + "  "
-                + state + "\n"
-        }
+        output += Self.flowTable(Array(flows))
 
         if summary.flowCount > flows.count {
             output += "\n… \(summary.flowCount - flows.count) more flows not shown\n"
@@ -133,6 +115,31 @@ final class TopView: @unchecked Sendable {
         }
     }
 
+    /// Renders flows as a plain table. Shared by the live view and the shutdown summary
+    /// so that what stays on screen after Ctrl-C matches what was being watched.
+    private static func flowTable(_ flows: [Flow]) -> String {
+        var output =
+            Column.left("PROCESS", 22) + Column.right("PID", 7) + "  "
+            + Column.left("PROTO", 6) + Column.left("REMOTE", 40)
+            + Column.right("UP", 11) + Column.right("DOWN", 11) + "  "
+            + "STATE\n"
+
+        for flow in flows {
+            let remote = "\(flow.key.remote):\(flow.key.remotePort)"
+            let state = flow.tcpState.map(String.init(describing:))
+                ?? (flow.key.transport == .udp ? "—" : "")
+            output +=
+                Column.left(flow.owner?.name ?? "(unknown)", 22)
+                + Column.right(flow.owner.map { String($0.pid) } ?? "—", 7) + "  "
+                + Column.left(flow.key.transport.name, 6)
+                + Column.left(remote, 40)
+                + Column.right(formatBytes(Double(flow.bytesOut)), 11)
+                + Column.right(formatBytes(Double(flow.bytesIn)), 11) + "  "
+                + state + "\n"
+        }
+        return output
+    }
+
     private func terminalRows() -> Int {
         var size = winsize()
         guard ioctl(STDOUT_FILENO, TIOCGWINSZ, &size) == 0, size.ws_row > 0 else {
@@ -141,22 +148,70 @@ final class TopView: @unchecked Sendable {
         return Int(size.ws_row)
     }
 
+    /// Prints a self-contained final report.
+    ///
+    /// Deliberately does not clear the screen: the live view is redrawn in place and is
+    /// therefore impossible to copy out of a terminal, so this is what survives and gets
+    /// shared. It repeats the table rather than assuming the last frame is still legible.
     private func shutDown() {
         let summary = monitor.summary()
+        let byBytes = summary.flows.sorted { $0.totalBytes > $1.totalBytes }
+
         print("")
-        print("Stopping.")
+        print(String(repeating: "─", count: 100))
+        print("Beholder summary — \(interfaces.joined(separator: ", "))")
+        print(String(repeating: "─", count: 100))
         print(
             """
-            \(summary.flowCount) flows tracked, \(summary.processCount) processes, \
-            \(summary.unattributedCount) unattributed, \
+            \(summary.flowCount) flows, \(summary.processCount) processes, \
+            \(formatBytes(Double(summary.totalBytesOut))) up, \
+            \(formatBytes(Double(summary.totalBytesIn))) down, \
             \(summary.attributionPasses) attribution passes.
             """
         )
+
         if summary.flowCount > 0 {
             let attributed = summary.flowCount - summary.unattributedCount
             let percentage = Double(attributed) / Double(summary.flowCount) * 100
-            print(String(format: "Attribution rate: %.1f%%", percentage))
+            print(
+                String(
+                    format: "Attribution: %d of %d flows named (%.1f%%), %d unknown.",
+                    attributed, summary.flowCount, percentage, summary.unattributedCount
+                )
+            )
         }
+        if summary.evictedFlowCount > 0 {
+            print(
+                "\(summary.evictedFlowCount) flows were evicted — the table hit its cap, "
+                    + "so these totals are an undercount."
+            )
+        }
+
+        print("")
+        print(Self.flowTable(Array(byBytes.prefix(40))))
+        if byBytes.count > 40 {
+            print("… \(byBytes.count - 40) further flows omitted.")
+        }
+
+        // Unattributed flows are the interesting failure mode, so list them explicitly
+        // rather than leaving them buried in the table above.
+        let unknown = byBytes.filter { $0.owner == nil }
+        if !unknown.isEmpty {
+            print("Unattributed flows (\(unknown.count)):")
+            for flow in unknown.prefix(15) {
+                print(
+                    "  \(Column.left(flow.key.transport.name, 5))"
+                        + "\(flow.key.local):\(flow.key.localPort) → "
+                        + "\(flow.key.remote):\(flow.key.remotePort)  "
+                        + "\(flow.totalPackets) packets, "
+                        + formatBytes(Double(flow.totalBytes))
+                )
+            }
+            if unknown.count > 15 {
+                print("  … and \(unknown.count - 15) more.")
+            }
+        }
+
         monitor.stop()
         exit(0)
     }
