@@ -19,6 +19,7 @@ final class FlowMonitor: @unchecked Sendable {
 
     // Confined to flowQueue.
     private let table = FlowTable()
+    private let names = NameResolutionCache()
     private var localAddresses: Set<IPAddress>
     private var recentlyDeparted: [ConnectionKey: (entry: SocketEntry, departedAt: Date)] = [:]
     private var previousConnections: [ConnectionKey: SocketEntry] = [:]
@@ -52,23 +53,42 @@ final class FlowMonitor: @unchecked Sendable {
 
     /// The handler to give `CaptureEngine`.
     ///
-    /// Note for later: `ParsedPacket.payloadOffset` points into pcap's buffer, which is
-    /// only valid for the duration of the capture callback. Anything that needs the
-    /// payload — TLS SNI, DNS answers — must extract it synchronously inside the
-    /// callback and pass the result by value, not read it from here.
-    func packetHandler() -> @Sendable (ParsedPacket, String) -> Void {
-        { [weak self] packet, interfaceName in
+    /// Hostname extraction happens *here*, synchronously, before anything is dispatched
+    /// elsewhere. The payload buffer belongs to libpcap and dies the moment this returns,
+    /// so the observation is turned into owned values first and only those cross onto the
+    /// flow queue.
+    func packetHandler() -> PacketSink {
+        { [weak self] packet, payload, interfaceName in
             guard let self else { return }
+            let observation = PayloadInspector.inspect(packet: packet, payload: payload)
+
             self.flowQueue.async {
                 let result = self.table.record(
                     packet,
                     interfaceName: interfaceName,
                     localAddresses: self.localAddresses
                 )
+                if let observation {
+                    self.apply(observation, to: result.key)
+                }
                 if result.isNew {
                     self.requestImmediateAttribution()
                 }
             }
+        }
+    }
+
+    /// Runs on flowQueue.
+    private func apply(_ observation: NameObservation, to key: FlowKey) {
+        switch observation {
+        case .serverName(let name):
+            table.setServerName(name, for: key)
+        case .dnsAnswer(let answer):
+            names.record(answer)
+            // A DNS answer usually arrives just before the connection it enables, so
+            // pushing names out immediately is what makes the very first flow to a host
+            // show a name rather than an address.
+            table.applyNames { self.names.name(for: $0) }
         }
     }
 
@@ -154,7 +174,9 @@ final class FlowMonitor: @unchecked Sendable {
             resolve(key, in: snapshot).map { (owner: $0.owner, tcpState: $0.tcpState) }
         }
         table.refreshState { key in resolve(key, in: snapshot)?.tcpState }
+        table.applyNames { self.names.name(for: $0, at: now) }
         table.expire(at: now)
+        names.expire(at: now)
     }
 
     /// Runs on flowQueue.
@@ -208,6 +230,9 @@ final class FlowMonitor: @unchecked Sendable {
         var evictedFlowCount: UInt64
         var attributionPasses: UInt64
         var onDemandPasses: UInt64
+        var namedFlowCount: Int
+        var cachedNameCount: Int
+        var privateRelayFlowCount: Int
     }
 
     func summary() -> Summary {
@@ -216,6 +241,8 @@ final class FlowMonitor: @unchecked Sendable {
             var owners = Set<ProcessOwner>()
             var unattributed = 0
             var unattributable = 0
+            var named = 0
+            var privateRelay = 0
             var out: UInt64 = 0
             var incoming: UInt64 = 0
 
@@ -226,6 +253,10 @@ final class FlowMonitor: @unchecked Sendable {
                     unattributed += 1
                 } else {
                     unattributable += 1
+                }
+                if flow.hostName != nil { named += 1 }
+                if NameResolutionCache.classify(hostName: flow.hostName) == .privateRelay {
+                    privateRelay += 1
                 }
                 out += flow.bytesOut
                 incoming += flow.bytesIn
@@ -241,7 +272,10 @@ final class FlowMonitor: @unchecked Sendable {
                 totalBytesIn: incoming,
                 evictedFlowCount: table.evictedFlowCount,
                 attributionPasses: attributionPasses,
-                onDemandPasses: onDemandPasses
+                onDemandPasses: onDemandPasses,
+                namedFlowCount: named,
+                cachedNameCount: names.count,
+                privateRelayFlowCount: privateRelay
             )
         }
     }

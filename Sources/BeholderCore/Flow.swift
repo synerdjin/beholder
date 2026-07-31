@@ -106,6 +106,14 @@ public struct Flow: Sendable {
     public var owner: ProcessOwner?
     public var tcpState: TCPState?
 
+    /// The hostname this connection asked for, and how that was established.
+    ///
+    /// SNI outranks DNS: it names the host for *this* connection, whereas a DNS answer
+    /// only says some name once resolved to this address, and one address commonly
+    /// serves many names.
+    public var hostName: String?
+    public var hostNameSource: NameSource?
+
     public init(key: FlowKey, interfaceName: String, at timestamp: Date) {
         self.key = key
         self.interfaceName = interfaceName

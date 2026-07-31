@@ -76,6 +76,15 @@ private enum DrainTrigger {
     case safetyTimer
 }
 
+/// Receives every parsed packet along with its transport payload.
+///
+/// **The payload buffer is only valid for the duration of the call.** It points into
+/// libpcap's receive buffer, which is reused for the next packet the moment this returns.
+/// Anything a handler needs from the payload — a hostname, a DNS answer — must be
+/// extracted synchronously and copied; handing the buffer to another queue reads freed
+/// memory. The `ParsedPacket` itself is a value and may be passed on freely.
+typealias PacketSink = @Sendable (ParsedPacket, UnsafeRawBufferPointer, String) -> Void
+
 // MARK: - Per-interface capture
 
 /// Owns one `pcap_t` and the dispatch sources draining it.
@@ -89,7 +98,7 @@ final class InterfaceCapture: @unchecked Sendable {
 
     private let handle: OpaquePointer
     private let queue: DispatchQueue
-    private let onPacket: @Sendable (ParsedPacket, String) -> Void
+    private let onPacket: PacketSink
     private var source: DispatchSourceRead?
     private var safetyTimer: DispatchSourceTimer?
     private var stopped = false
@@ -105,7 +114,7 @@ final class InterfaceCapture: @unchecked Sendable {
         linkLayer: LinkLayer,
         handle: OpaquePointer,
         queue: DispatchQueue,
-        onPacket: @escaping @Sendable (ParsedPacket, String) -> Void
+        onPacket: @escaping PacketSink
     ) {
         self.interfaceName = interfaceName
         self.linkLayer = linkLayer
@@ -120,7 +129,7 @@ final class InterfaceCapture: @unchecked Sendable {
         bufferSize: Int32,
         filter: String,
         queue: DispatchQueue,
-        onPacket: @escaping @Sendable (ParsedPacket, String) -> Void
+        onPacket: @escaping PacketSink
     ) throws -> InterfaceCapture {
         var errorBuffer = [CChar](repeating: 0, count: Int(PCAP_ERRBUF_SIZE))
 
@@ -258,7 +267,14 @@ final class InterfaceCapture: @unchecked Sendable {
         switch PacketParser.parse(buffer, linkLayer: linkLayer, wireBytes: header.len) {
         case .success(let packet):
             counters.parsed += 1
-            onPacket(packet, interfaceName)
+            // The payload slice is handed straight through and is valid only until this
+            // returns — see PacketSink. Clamped defensively even though the parser
+            // already bounds the offset.
+            let payloadStart = min(packet.payloadOffset, buffer.count)
+            let payload = UnsafeRawBufferPointer(
+                rebasing: buffer[payloadStart..<buffer.count]
+            )
+            onPacket(packet, payload, interfaceName)
         case .failure(let reason):
             switch reason {
             case .notIP:
@@ -316,17 +332,21 @@ private let packetCallback: pcap_handler = { user, header, bytes in
 // MARK: - Engine
 
 final class CaptureEngine: @unchecked Sendable {
-    /// 512 bytes captures IP and TCP headers, a whole DNS answer, and nearly every TLS
+    /// Enough to hold IP and TCP headers, a complete DNS answer, and a full TLS
     /// ClientHello, while leaving bulk payload in the kernel where it belongs.
-    static let defaultSnapshotLength: Int32 = 512
+    ///
+    /// 512 was the earlier value and truncated some ClientHellos before their SNI
+    /// extension, silently costing hostnames. The extra copy is a few hundred KB per
+    /// second even on a busy link, and none of it is retained.
+    static let defaultSnapshotLength: Int32 = 1024
     static let defaultBufferSize: Int32 = 4 * 1024 * 1024
     static let defaultFilter = "ip or ip6"
 
     private let queue = DispatchQueue(label: "com.beholder.capture", qos: .utility)
     private var captures: [String: InterfaceCapture] = [:]
-    private let onPacket: @Sendable (ParsedPacket, String) -> Void
+    private let onPacket: PacketSink
 
-    init(onPacket: @escaping @Sendable (ParsedPacket, String) -> Void) {
+    init(onPacket: @escaping PacketSink) {
         self.onPacket = onPacket
     }
 

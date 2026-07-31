@@ -92,6 +92,28 @@ public final class FlowTable {
         }
     }
 
+    /// Records the hostname a specific connection asked for, from its own ClientHello.
+    ///
+    /// SNI is direct evidence for this flow, so it replaces any name previously guessed
+    /// from DNS.
+    public func setServerName(_ name: String, for key: FlowKey) {
+        guard flows[key] != nil else { return }
+        flows[key]?.hostName = name
+        flows[key]?.hostNameSource = .serverNameIndication
+    }
+
+    /// Fills in hostnames from the DNS cache for flows that do not already have better
+    /// evidence. Applied to every flow each pass, because a DNS answer often arrives
+    /// after the connection it was looking up has already started.
+    public func applyNames(_ lookup: (IPAddress) -> String?) {
+        for (key, flow) in flows where flow.hostNameSource != .serverNameIndication {
+            if let name = lookup(flow.key.remote) {
+                flows[key]?.hostName = name
+                flows[key]?.hostNameSource = .dns
+            }
+        }
+    }
+
     /// Whether any flow is still waiting to be attributed. Drives the adaptive poll rate:
     /// there is no point walking every process's file descriptors when nothing is
     /// unresolved.

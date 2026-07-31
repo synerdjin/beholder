@@ -116,6 +116,26 @@ final class TopView: @unchecked Sendable {
         }
     }
 
+    /// How to label the far end of a flow.
+    ///
+    /// A hostname if one was established, otherwise the address — never a blank, since
+    /// the address is always true even when the name is unknown. Private Relay ingress is
+    /// called out because the real destination behind it is unknowable by design, and an
+    /// unexplained Apple address looks like a failure rather than a privacy feature.
+    private static func describeRemote(_ flow: Flow) -> String {
+        let port = flow.key.remotePort
+        guard let hostName = flow.hostName else {
+            return "\(flow.key.remote):\(port)"
+        }
+        if NameResolutionCache.classify(hostName: hostName) == .privateRelay {
+            return "\(hostName):\(port)  [Private Relay]"
+        }
+        // A dot marks a name inferred from DNS rather than read from this connection's
+        // own handshake, so a shared address is never mistaken for proof.
+        let marker = flow.hostNameSource == .dns ? "·" : ""
+        return "\(marker)\(hostName):\(port)"
+    }
+
     /// Renders flows as a plain table. Shared by the live view and the shutdown summary
     /// so that what stays on screen after Ctrl-C matches what was being watched.
     private static func flowTable(_ flows: [Flow]) -> String {
@@ -126,7 +146,7 @@ final class TopView: @unchecked Sendable {
             + "STATE\n"
 
         for flow in flows {
-            let remote = "\(flow.key.remote):\(flow.key.remotePort)"
+            let remote = describeRemote(flow)
             let state = flow.tcpState.map(String.init(describing:))
                 ?? (flow.key.transport == .udp ? "—" : "")
             output +=
@@ -195,6 +215,26 @@ final class TopView: @unchecked Sendable {
             print(
                 "\(summary.unattributableCount) flows carry no ports (ICMP and similar), "
                     + "so no socket exists to attribute them to — these are system traffic."
+            )
+        }
+
+        if summary.flowCount > 0 {
+            let share = Double(summary.namedFlowCount) / Double(summary.flowCount) * 100
+            print(
+                String(
+                    format: "Hostnames: %d of %d flows named (%.1f%%), %d addresses cached.",
+                    summary.namedFlowCount, summary.flowCount, share, summary.cachedNameCount
+                )
+            )
+        }
+        if summary.privateRelayFlowCount > 0 {
+            print(
+                """
+                \(summary.privateRelayFlowCount) flows go through iCloud Private Relay. \
+                Their real destinations are encrypted end-to-end to Apple and cannot be \
+                determined from this machine — that is the feature working, not a gap in \
+                Beholder.
+                """
             )
         }
         if summary.evictedFlowCount > 0 {

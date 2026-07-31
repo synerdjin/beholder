@@ -43,11 +43,11 @@ enum Beholderd {
         // In --top mode the flow monitor consumes packets; otherwise they are only
         // counted, since Phase 0's statistics view has no use for them.
         let monitor = options.top ? FlowMonitor() : nil
-        let packetHandler: @Sendable (ParsedPacket, String) -> Void
+        let packetHandler: PacketSink
         if let monitor {
             packetHandler = monitor.packetHandler()
         } else {
-            packetHandler = { _, _ in }
+            packetHandler = { _, _, _ in }
         }
         let engine = CaptureEngine(onPacket: packetHandler)
 
