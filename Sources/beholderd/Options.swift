@@ -5,12 +5,15 @@ struct Options {
     var includeLoopback = false
     var dumpSockets = false
     var selfTest = false
+    var top = false
 
     static let usage = """
-        usage: beholderd [--loopback] [--sockets] [--self-test] [interface ...]
+        usage: beholderd [--top] [--loopback] [--sockets] [--self-test] [interface ...]
 
           interface     Interface(s) to capture. Defaults to the interface carrying the
                         default route, which with a VPN active is the tunnel, not en0.
+          --top         Show a live table of connections by process, sorted by volume.
+                        Without it, beholderd prints per-interface capture statistics.
           --loopback    Additionally capture lo0.
           --sockets     Dump the socket-to-process table and exit, instead of capturing.
                         Needs no root, but only reveals your own processes unless run as
@@ -30,6 +33,8 @@ struct Options {
                 options.includeLoopback = true
             case "--sockets", "-s":
                 options.dumpSockets = true
+            case "--top", "-t":
+                options.top = true
             case "--self-test":
                 options.selfTest = true
             case "--help", "-h":

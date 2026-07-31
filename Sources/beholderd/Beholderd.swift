@@ -18,6 +18,17 @@ import Foundation
 // state trap at runtime.
 @main
 enum Beholderd {
+    /// Objects that own dispatch sources have to outlive `main()`.
+    ///
+    /// `dispatchMain()` never returns, which means the compiler is free to release
+    /// `main()`'s locals before it is even called. A released reporter takes its timer
+    /// with it, and the process then sits in `dispatchMain()` forever, alive but silent —
+    /// no output, no exit, no error. Holding the references here for the lifetime of the
+    /// process removes the question entirely.
+    ///
+    /// Written once during startup, before any concurrency exists.
+    private nonisolated(unsafe) static var retained: [AnyObject] = []
+
     static func main() {
         guard let options = Options.parse(Array(CommandLine.arguments.dropFirst())) else {
             print(Options.usage)
@@ -29,10 +40,22 @@ enum Beholderd {
             exit(0)
         }
 
-        let engine = CaptureEngine { _, _ in }
+        // In --top mode the flow monitor consumes packets; otherwise they are only
+        // counted, since Phase 0's statistics view has no use for them.
+        let monitor = options.top ? FlowMonitor() : nil
+        let packetHandler: @Sendable (ParsedPacket, String) -> Void
+        if let monitor {
+            packetHandler = monitor.packetHandler()
+        } else {
+            packetHandler = { _, _ in }
+        }
+        let engine = CaptureEngine(onPacket: packetHandler)
+
+        var interfaces: [String] = []
 
         if !options.selfTest {
-            for interface in resolveInterfaces(options) {
+            interfaces = resolveInterfaces(options)
+            for interface in interfaces {
                 do {
                     try engine.start(interface: interface)
                 } catch let error as CaptureError {
@@ -50,13 +73,26 @@ enum Beholderd {
             }
             print("")
         } else {
-            print("Self-test: running the reporting loop with no interfaces.")
+            let path = options.top ? "live view" : "reporting loop"
+            print("Self-test: running the \(path) with no interfaces.")
             print("")
         }
 
-        let reporter = StatisticsReporter(engine: engine)
-        reporter.installSignalHandlers()
-        reporter.start(stopAfterTicks: options.selfTest ? 3 : nil)
+        retained.append(engine)
+
+        if let monitor {
+            monitor.start()
+            let view = TopView(monitor: monitor, interfaces: interfaces)
+            view.installSignalHandlers()
+            view.start(stopAfterTicks: options.selfTest ? 3 : nil)
+            retained.append(monitor)
+            retained.append(view)
+        } else {
+            let reporter = StatisticsReporter(engine: engine)
+            reporter.installSignalHandlers()
+            reporter.start(stopAfterTicks: options.selfTest ? 3 : nil)
+            retained.append(reporter)
+        }
 
         dispatchMain()
     }

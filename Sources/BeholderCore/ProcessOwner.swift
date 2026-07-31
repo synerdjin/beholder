@@ -1,7 +1,27 @@
-import CBeholderShim
+import Darwin
+
+/// The process behind a socket.
+public struct ProcessOwner: Sendable, Hashable {
+    public let pid: pid_t
+    public let path: String
+
+    public init(pid: pid_t, path: String) {
+        self.pid = pid
+        self.path = path
+    }
+
+    /// The executable's filename, or a pid fallback when the path is unavailable —
+    /// which happens for processes we lack the privilege to inspect.
+    public var name: String {
+        guard let last = path.split(separator: "/").last, !last.isEmpty else {
+            return "pid \(pid)"
+        }
+        return String(last)
+    }
+}
 
 /// TCP connection state as reported by libproc (`tcpsi_state`, the `TSI_S_*` values).
-enum TCPState: Int32, Sendable, CustomStringConvertible {
+public enum TCPState: Int32, Sendable, CustomStringConvertible {
     case closed = 0
     case listen = 1
     case synSent = 2
@@ -15,7 +35,7 @@ enum TCPState: Int32, Sendable, CustomStringConvertible {
     case timeWait = 10
     case reserved = 11
 
-    var description: String {
+    public var description: String {
         switch self {
         case .closed: return "CLOSED"
         case .listen: return "LISTEN"
@@ -35,7 +55,7 @@ enum TCPState: Int32, Sendable, CustomStringConvertible {
     /// Whether packets can still flow on this connection. Sockets past this point hold a
     /// 5-tuple that no longer describes live traffic, and reusing it for attribution
     /// risks pinning a new connection on whichever process happened to own the port last.
-    var canCarryTraffic: Bool {
+    public var canCarryTraffic: Bool {
         switch self {
         case .closed, .listen, .timeWait, .reserved:
             return false

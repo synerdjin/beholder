@@ -51,14 +51,27 @@ it does not recognise, rather than guessing and misparsing everything.
 
 ## Status
 
-Phase 0 (capture foundation) is implemented:
+**Phase 0 — capture foundation. Done, verified on-device.**
 
 - [x] Link-layer handling: `DLT_NULL`, `DLT_EN10MB` (incl. VLAN), `DLT_RAW`, `DLT_LOOP`
 - [x] IPv4/IPv6 parsing with extension-header walking and fragment handling
 - [x] TCP/UDP/ICMP, with graceful handling of packets that carry no ports
 - [x] Default-route discovery via routing socket
 - [x] Capture engine: non-blocking pcap on a dispatch source, per-interface statistics
-- [ ] Flow table and process attribution — Phase 1
+
+Measured on a live machine: 100% parse rate on a `utun` tunnel (224/224 packets) and
+loopback (20/20), `ps_recv` matching the delivered packet count exactly, zero kernel
+drops.
+
+**Phase 1 — flows and attribution. Implemented, pending live measurement.**
+
+- [x] Process attribution via libproc, verified against `lsof`
+- [x] Direction-normalised flow table with idle expiry and bounded eviction
+- [x] Adaptive attribution polling, with a grace window for just-closed sockets
+- [x] `--top`: live connections by process, sorted by volume
+
+**Later**
+
 - [ ] XPC + SwiftUI app — Phase 2
 - [ ] DNS/SNI enrichment, GeoIP, map — Phase 3
 - [ ] SQLite history — Phase 4
@@ -70,17 +83,29 @@ swift build
 swift test
 ```
 
-Capture requires root:
+Capture requires root. For the live connection view:
 
 ```bash
-sudo ./.build/debug/beholderd
+sudo ./.build/debug/beholderd --top --loopback
 ```
 
-With no arguments it captures the default-route interface. Pass interface names to
+For per-interface capture statistics instead, drop `--top`. In that view the **parsed**
+column is the one to watch: if packets are arriving but `parsed` stays near zero, the
+link-layer assumption for that interface is wrong. **BPF-RECV** climbing while **PKTS/S**
+stays at zero means packets are being captured but not drained.
+
+With no interface arguments it captures whatever carries the default route. Pass names to
 override, or `--loopback` to add `lo0`.
 
-The **parsed** column is the one to watch: if packets are arriving but `parsed` stays near
-zero, the link-layer assumption for that interface is wrong.
+Two subcommands need no root:
+
+```bash
+./.build/debug/beholderd --sockets
+```
+
+dumps the socket-to-process table for comparison against `lsof -nP -i TCP`, and
+`--self-test` runs the timers and render path without capturing, which is enough to catch
+the isolation and object-lifetime faults that otherwise only appear under `sudo`.
 
 ## Privacy
 

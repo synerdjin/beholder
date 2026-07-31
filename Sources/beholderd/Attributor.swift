@@ -5,17 +5,8 @@ import Foundation
 
 // MARK: - Identity types
 
-struct ProcessOwner: Sendable, Hashable {
-    let pid: pid_t
-    let path: String
-
-    var name: String {
-        guard let last = path.split(separator: "/").last, !last.isEmpty else {
-            return "pid \(pid)"
-        }
-        return String(last)
-    }
-}
+// ProcessOwner and TCPState live in BeholderCore, so the flow table can depend on them
+// and be tested without any of libproc's privilege requirements.
 
 /// A fully-connected socket: both ends known.
 struct ConnectionKey: Hashable, Sendable {
