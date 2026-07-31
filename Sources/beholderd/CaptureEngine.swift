@@ -47,21 +47,38 @@ struct CaptureCounters: Sendable, Equatable {
     var nonIP: UInt64 = 0
     var truncatedHeaders: UInt64 = 0
     var otherFailures: UInt64 = 0
+
+    /// Which wakeup actually delivered packets. Kept because the read source and the
+    /// safety timer are redundant by design, and knowing which one does the work is the
+    /// difference between "capture is healthy" and "capture only works by accident".
+    var deliveringSourceWakeups: UInt64 = 0
+    var deliveringTimerWakeups: UInt64 = 0
 }
 
 struct InterfaceStatistics: Sendable {
     let interfaceName: String
     let linkLayer: LinkLayer
     var counters: CaptureCounters
-    /// Packets the kernel had to drop because the BPF buffer filled up. Any sustained
-    /// non-zero value here means the numbers Beholder reports are an undercount.
+
+    /// Packets BPF has accepted for this handle, read or not. If this climbs while
+    /// `counters.packets` stays at zero, packets are arriving but nothing is draining
+    /// them — which is precisely what happens when immediate mode is off.
+    var bpfReceived: UInt32
+    /// Packets the kernel dropped because the buffer filled. Sustained non-zero values
+    /// mean the reported numbers are an undercount.
     var kernelDropped: UInt32
     var interfaceDropped: UInt32
 }
 
+/// Which wakeup caused a drain, so we can tell the two mechanisms apart.
+private enum DrainTrigger {
+    case readSource
+    case safetyTimer
+}
+
 // MARK: - Per-interface capture
 
-/// Owns one `pcap_t` and the dispatch source draining it.
+/// Owns one `pcap_t` and the dispatch sources draining it.
 ///
 /// All mutable state is confined to the engine's serial queue; `@unchecked Sendable` is
 /// the honest annotation here, since the invariant is queue confinement rather than
@@ -74,13 +91,14 @@ final class InterfaceCapture: @unchecked Sendable {
     private let queue: DispatchQueue
     private let onPacket: @Sendable (ParsedPacket, String) -> Void
     private var source: DispatchSourceRead?
+    private var safetyTimer: DispatchSourceTimer?
     private var stopped = false
 
     fileprivate var counters = CaptureCounters()
 
     /// How many packets to pull per wakeup. Bounded so one busy interface cannot starve
     /// the others sharing the capture queue; the read source re-fires if more remain.
-    private static let batchLimit: Int32 = 128
+    private static let batchLimit: Int32 = 256
 
     private init(
         interfaceName: String,
@@ -120,6 +138,16 @@ final class InterfaceCapture: @unchecked Sendable {
         pcap_set_timeout(handle, 100)
         pcap_set_buffer_size(handle, bufferSize)
 
+        // Immediate mode is mandatory here, not an optimisation.
+        //
+        // A BPF descriptor's read timeout only applies to *blocking* reads. When the
+        // descriptor is polled through kqueue — which is what a DispatchSource does — it
+        // does not become readable until the store buffer fills. With a multi-megabyte
+        // buffer and ordinary traffic that can take hours, so capture silently reports
+        // zero packets forever while BPF quietly accumulates them. BIOCIMMEDIATE, which
+        // this sets, makes each batch readable as soon as it arrives.
+        pcap_set_immediate_mode(handle, 1)
+
         let status = pcap_activate(handle)
         if status < 0 {
             let message = String(cString: pcap_statustostr(status))
@@ -140,7 +168,7 @@ final class InterfaceCapture: @unchecked Sendable {
             )
         }
 
-        // Non-blocking, because the dispatch source decides when we read.
+        // Non-blocking, because the dispatch sources decide when we read.
         if pcap_setnonblock(handle, 1, &errorBuffer) < 0 {
             let message = String(nullTerminated: errorBuffer)
             pcap_close(handle)
@@ -177,18 +205,29 @@ final class InterfaceCapture: @unchecked Sendable {
         )
 
         let source = DispatchSource.makeReadSource(fileDescriptor: descriptor, queue: queue)
-        source.setEventHandler { [weak capture] in capture?.drain() }
+        source.setEventHandler { [weak capture] in capture?.drain(trigger: .readSource) }
         // Closing the pcap handle from the cancel handler guarantees it outlives any
         // in-flight event handler — closing it eagerly from stop() would race.
         source.setCancelHandler { pcap_close(handle) }
         capture.source = source
         source.resume()
 
+        // Belt and braces. Readability notification on BPF descriptors has enough
+        // platform-specific quirks that a monitoring tool should not depend on it alone;
+        // a periodic drain bounds worst-case latency to half a second no matter what.
+        // The counters record which mechanism actually delivers, so this cannot quietly
+        // paper over a broken read source.
+        let safetyTimer = DispatchSource.makeTimerSource(queue: queue)
+        safetyTimer.schedule(deadline: .now() + 0.5, repeating: 0.5, leeway: .milliseconds(100))
+        safetyTimer.setEventHandler { [weak capture] in capture?.drain(trigger: .safetyTimer) }
+        capture.safetyTimer = safetyTimer
+        safetyTimer.resume()
+
         return capture
     }
 
     /// Must run on the capture queue.
-    private func drain() {
+    private func drain(trigger: DrainTrigger) {
         guard !stopped else { return }
         let context = Unmanaged.passUnretained(self).toOpaque()
         let result = pcap_dispatch(
@@ -197,6 +236,13 @@ final class InterfaceCapture: @unchecked Sendable {
             packetCallback,
             context.assumingMemoryBound(to: UInt8.self)
         )
+
+        if result > 0 {
+            switch trigger {
+            case .readSource: counters.deliveringSourceWakeups += 1
+            case .safetyTimer: counters.deliveringTimerWakeups += 1
+            }
+        }
         // -1 is an error; -2 means pcap_breakloop() was called. Neither is recoverable
         // by retrying in place, so stop this interface and let the engine report it.
         if result < 0 {
@@ -228,9 +274,11 @@ final class InterfaceCapture: @unchecked Sendable {
     /// Must run on the capture queue.
     fileprivate func statistics() -> InterfaceStatistics {
         var stats = pcap_stat()
+        var received: UInt32 = 0
         var kernelDropped: UInt32 = 0
         var interfaceDropped: UInt32 = 0
         if !stopped, pcap_stats(handle, &stats) == 0 {
+            received = stats.ps_recv
             kernelDropped = stats.ps_drop
             interfaceDropped = stats.ps_ifdrop
         }
@@ -238,6 +286,7 @@ final class InterfaceCapture: @unchecked Sendable {
             interfaceName: interfaceName,
             linkLayer: linkLayer,
             counters: counters,
+            bpfReceived: received,
             kernelDropped: kernelDropped,
             interfaceDropped: interfaceDropped
         )
@@ -247,6 +296,8 @@ final class InterfaceCapture: @unchecked Sendable {
     fileprivate func stop() {
         guard !stopped else { return }
         stopped = true
+        safetyTimer?.cancel()
+        safetyTimer = nil
         source?.cancel()
         source = nil
     }

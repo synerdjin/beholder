@@ -39,8 +39,8 @@ final class StatisticsReporter: @unchecked Sendable {
         print(
             Column.left("INTERFACE", 12) + Column.right("PKTS/S", 10)
                 + Column.right("BYTES/S", 14) + Column.right("TOTAL", 14)
-                + Column.right("PARSED", 12) + Column.right("NON-IP", 10)
-                + Column.right("DROPPED", 10)
+                + Column.right("PARSED", 12) + Column.right("BPF-RECV", 11)
+                + Column.right("NON-IP", 9) + Column.right("DROPPED", 9)
         )
 
         let timer = DispatchSource.makeTimerSource(queue: queue)
@@ -83,8 +83,9 @@ final class StatisticsReporter: @unchecked Sendable {
                     + Column.right(formatBytes(byteRate) + "/s", 14)
                     + Column.right(formatBytes(Double(current.wireBytes)), 14)
                     + Column.right(current.parsed, 12)
-                    + Column.right(current.nonIP, 10)
-                    + Column.right(statistics.kernelDropped, 10)
+                    + Column.right(statistics.bpfReceived, 11)
+                    + Column.right(current.nonIP, 9)
+                    + Column.right(statistics.kernelDropped, 9)
             )
         }
 
@@ -110,11 +111,32 @@ final class StatisticsReporter: @unchecked Sendable {
                 \(counters.parsed) parsed, \(counters.nonIP) non-IP, \
                 \(counters.truncatedHeaders) truncated, \
                 \(counters.otherFailures) other failures, \
+                \(statistics.bpfReceived) accepted by BPF, \
                 \(statistics.kernelDropped) dropped by the kernel
                 """
             )
+            print("  delivered by: \(deliveryDescription(counters))")
         }
         engine.stopAll()
         exit(0)
+    }
+
+    /// Which wakeup mechanism actually produced packets. The read source and the safety
+    /// timer are redundant on purpose, so this distinguishes "capture is healthy" from
+    /// "capture only works because of the fallback".
+    private func deliveryDescription(_ counters: CaptureCounters) -> String {
+        switch (counters.deliveringSourceWakeups, counters.deliveringTimerWakeups) {
+        case (0, 0):
+            return "nothing — no wakeup ever returned a packet"
+        case (let source, 0):
+            return "read source only (\(source) productive wakeups) — healthy"
+        case (0, let timer):
+            return """
+                safety timer only (\(timer) productive wakeups) — the read source is \
+                never firing; capture works but is running on the fallback
+                """
+        case (let source, let timer):
+            return "read source \(source), safety timer \(timer)"
+        }
     }
 }
