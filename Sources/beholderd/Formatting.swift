@@ -22,6 +22,27 @@ enum Column {
     }
 }
 
+/// Full local date, time and zone.
+///
+/// Reports get copied out of a terminal and read days later, often alongside a commit
+/// log. A bare time-of-day makes two runs indistinguishable, so every report stamps the
+/// date too.
+func formatTimestamp(_ date: Date) -> String {
+    let formatter = DateFormatter()
+    formatter.dateFormat = "yyyy-MM-dd HH:mm:ss zzz"
+    return formatter.string(from: date)
+}
+
+func formatDuration(_ seconds: TimeInterval) -> String {
+    let total = Int(seconds.rounded())
+    let hours = total / 3600
+    let minutes = (total % 3600) / 60
+    let secs = total % 60
+    if hours > 0 { return String(format: "%dh %02dm %02ds", hours, minutes, secs) }
+    if minutes > 0 { return String(format: "%dm %02ds", minutes, secs) }
+    return String(format: "%ds", secs)
+}
+
 func formatBytes(_ bytes: Double) -> String {
     let units = ["B", "KB", "MB", "GB", "TB"]
     var value = bytes

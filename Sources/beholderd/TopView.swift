@@ -19,6 +19,7 @@ final class TopView: @unchecked Sendable {
     private var previousBytesIn: UInt64 = 0
     private var previousSampleAt = Date()
     private var ticksRemaining: Int?
+    private let startedAt = Date()
 
     private static let clearScreen = "\u{1B}[H\u{1B}[J"
 
@@ -73,20 +74,20 @@ final class TopView: @unchecked Sendable {
 
         var output = Self.clearScreen
 
-        let timestamp = DateFormatter.localizedString(
-            from: now, dateStyle: .none, timeStyle: .medium
-        )
         output += """
             Beholder — \(interfaces.joined(separator: ", "))\
               ·  \(summary.flowCount) flows, \(summary.processCount) processes\
-              ·  up \(formatBytes(outRate))/s  down \(formatBytes(inRate))/s\
-              ·  \(timestamp)
+              ·  up \(formatBytes(outRate))/s  down \(formatBytes(inRate))/s
+            \(formatTimestamp(now))  ·  running \(formatDuration(now.timeIntervalSince(startedAt)))
 
             """
         if summary.unattributedCount > 0 || summary.evictedFlowCount > 0 {
             var notes: [String] = []
             if summary.unattributedCount > 0 {
-                notes.append("\(summary.unattributedCount) flows unattributed")
+                let share = Double(summary.unattributedCount) / Double(max(summary.flowCount, 1))
+                notes.append(
+                    "\(summary.unattributedCount) unattributed (\(Int(share * 100))%)"
+                )
             }
             if summary.evictedFlowCount > 0 {
                 notes.append("\(summary.evictedFlowCount) flows evicted (table full)")
@@ -157,16 +158,22 @@ final class TopView: @unchecked Sendable {
         let summary = monitor.summary()
         let byBytes = summary.flows.sorted { $0.totalBytes > $1.totalBytes }
 
+        let endedAt = Date()
         print("")
         print(String(repeating: "─", count: 100))
         print("Beholder summary — \(interfaces.joined(separator: ", "))")
+        print(
+            "Started \(formatTimestamp(startedAt))  ·  ended \(formatTimestamp(endedAt))"
+                + "  ·  ran \(formatDuration(endedAt.timeIntervalSince(startedAt)))"
+        )
         print(String(repeating: "─", count: 100))
         print(
             """
             \(summary.flowCount) flows, \(summary.processCount) processes, \
             \(formatBytes(Double(summary.totalBytesOut))) up, \
             \(formatBytes(Double(summary.totalBytesIn))) down, \
-            \(summary.attributionPasses) attribution passes.
+            \(summary.attributionPasses) attribution passes \
+            (\(summary.onDemandPasses) triggered by new flows).
             """
         )
 
@@ -185,6 +192,13 @@ final class TopView: @unchecked Sendable {
                 "\(summary.evictedFlowCount) flows were evicted — the table hit its cap, "
                     + "so these totals are an undercount."
             )
+        }
+
+        // A proxy fronting other apps makes every per-process number below misleading,
+        // so this is stated before the table rather than as a footnote after it.
+        for finding in ProxyDetection.findLikelyProxies(in: summary.flows) {
+            print("")
+            print("⚠︎  \(finding.advice)")
         }
 
         print("")

@@ -23,7 +23,9 @@ final class FlowMonitor: @unchecked Sendable {
     private var recentlyDeparted: [ConnectionKey: (entry: SocketEntry, departedAt: Date)] = [:]
     private var previousConnections: [ConnectionKey: SocketEntry] = [:]
     private var lastAttributionAt = Date.distantPast
+    private var lastOnDemandRequestAt = Date.distantPast
     private var attributionPasses: UInt64 = 0
+    private var onDemandPasses: UInt64 = 0
 
     private var attributionTimer: DispatchSourceTimer?
     private var addressTimer: DispatchSourceTimer?
@@ -39,6 +41,11 @@ final class FlowMonitor: @unchecked Sendable {
     private static let fastPollInterval: TimeInterval = 0.1
     private static let idlePollInterval: TimeInterval = 1.0
 
+    /// Minimum gap between attribution passes triggered by a brand-new flow. Each pass
+    /// walks every process's file descriptors, so this bounds the cost when a burst of
+    /// connections opens at once — a page load can create dozens in a few milliseconds.
+    private static let onDemandMinimumGap: TimeInterval = 0.025
+
     init() {
         self.localAddresses = LocalAddresses.current()
     }
@@ -53,11 +60,31 @@ final class FlowMonitor: @unchecked Sendable {
         { [weak self] packet, interfaceName in
             guard let self else { return }
             self.flowQueue.async {
-                self.table.record(
+                let result = self.table.record(
                     packet,
                     interfaceName: interfaceName,
                     localAddresses: self.localAddresses
                 )
+                if result.isNew {
+                    self.requestImmediateAttribution()
+                }
+            }
+        }
+    }
+
+    /// Runs on flowQueue. Asks for an attribution pass right now, because a socket that
+    /// has only just started sending may not survive until the next scheduled poll.
+    private func requestImmediateAttribution() {
+        let now = Date()
+        guard now.timeIntervalSince(lastOnDemandRequestAt) >= Self.onDemandMinimumGap
+        else { return }
+        lastOnDemandRequestAt = now
+        attributionQueue.async { [weak self] in
+            guard let self else { return }
+            let snapshot = Attributor.snapshot()
+            self.flowQueue.async {
+                self.onDemandPasses += 1
+                self.apply(snapshot, at: Date())
             }
         }
     }
@@ -175,6 +202,7 @@ final class FlowMonitor: @unchecked Sendable {
         var totalBytesIn: UInt64
         var evictedFlowCount: UInt64
         var attributionPasses: UInt64
+        var onDemandPasses: UInt64
     }
 
     func summary() -> Summary {
@@ -203,7 +231,8 @@ final class FlowMonitor: @unchecked Sendable {
                 totalBytesOut: out,
                 totalBytesIn: incoming,
                 evictedFlowCount: table.evictedFlowCount,
-                attributionPasses: attributionPasses
+                attributionPasses: attributionPasses,
+                onDemandPasses: onDemandPasses
             )
         }
     }

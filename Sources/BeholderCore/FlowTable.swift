@@ -40,16 +40,22 @@ public final class FlowTable {
     public var count: Int { flows.count }
 
     /// Folds one captured packet into the table.
+    ///
+    /// `isNew` lets the caller react the instant a conversation appears. That matters for
+    /// short-lived sockets — a DNS query and its answer can be over in under a
+    /// millisecond — where waiting for the next scheduled attribution poll means the
+    /// socket is already gone.
     @discardableResult
     public func record(
         _ packet: ParsedPacket,
         interfaceName: String,
         localAddresses: Set<IPAddress>,
         at timestamp: Date = Date()
-    ) -> FlowKey {
+    ) -> (key: FlowKey, isNew: Bool) {
         let (key, direction) = FlowKey.make(from: packet, localAddresses: localAddresses)
 
-        if flows[key] == nil {
+        let isNew = flows[key] == nil
+        if isNew {
             flows[key] = Flow(key: key, interfaceName: interfaceName, at: timestamp)
         }
         flows[key]?.record(
@@ -58,7 +64,7 @@ public final class FlowTable {
             tcpFlags: packet.tcpFlags,
             at: timestamp
         )
-        return key
+        return (key, isNew)
     }
 
     /// Applies an ownership lookup to every flow that still lacks one.
