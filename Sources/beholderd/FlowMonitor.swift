@@ -196,7 +196,12 @@ final class FlowMonitor: @unchecked Sendable {
     struct Summary: Sendable {
         var flows: [Flow]
         var flowCount: Int
+        /// Flows that could have been attributed but were not — the real miss rate.
         var unattributedCount: Int
+        /// Flows with no ports (ICMP and friends), which have no socket to match against
+        /// at all. Counting these as failures would overstate the miss rate and imply a
+        /// problem that no amount of polling can fix.
+        var unattributableCount: Int
         var processCount: Int
         var totalBytesOut: UInt64
         var totalBytesIn: UInt64
@@ -210,14 +215,17 @@ final class FlowMonitor: @unchecked Sendable {
             let flows = table.activeFlows()
             var owners = Set<ProcessOwner>()
             var unattributed = 0
+            var unattributable = 0
             var out: UInt64 = 0
             var incoming: UInt64 = 0
 
             for flow in flows {
                 if let owner = flow.owner {
                     owners.insert(owner)
-                } else {
+                } else if flow.key.transport.hasPorts {
                     unattributed += 1
+                } else {
+                    unattributable += 1
                 }
                 out += flow.bytesOut
                 incoming += flow.bytesIn
@@ -227,6 +235,7 @@ final class FlowMonitor: @unchecked Sendable {
                 flows: flows,
                 flowCount: flows.count,
                 unattributedCount: unattributed,
+                unattributableCount: unattributable,
                 processCount: owners.count,
                 totalBytesOut: out,
                 totalBytesIn: incoming,

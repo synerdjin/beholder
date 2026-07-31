@@ -63,12 +63,32 @@ Measured on a live machine: 100% parse rate on a `utun` tunnel (224/224 packets)
 loopback (20/20), `ps_recv` matching the delivered packet count exactly, zero kernel
 drops.
 
-**Phase 1 — flows and attribution. Implemented, pending live measurement.**
+**Phase 1 — flows and attribution. Done, measured on-device.**
 
 - [x] Process attribution via libproc, verified against `lsof`
 - [x] Direction-normalised flow table with idle expiry and bounded eviction
-- [x] Adaptive attribution polling, with a grace window for just-closed sockets
+- [x] Adaptive attribution polling, plus an immediate pass when a new flow appears
 - [x] `--top`: live connections by process, sorted by volume
+- [x] Transparent-proxy detection
+
+Measured over a 45-second run with 211 flows: **95.3% of attributable flows named**. The
+remainder were two-packet DNS exchanges on ephemeral sockets that are gone before any
+poll can see them. ICMP is reported separately, since without ports there is no socket to
+attribute it to at all.
+
+### Transparent proxies defeat attribution
+
+An earlier run named `com.nordvpn.macos.Shield` — NordVPN's Threat Protection system
+extension — as the source of ~20 MB of web browsing, and attribution sat at 49.5%. That
+was correct but useless: a transparent proxy intercepts an application's connection and
+re-originates it from its own socket, so the originating application never appears on the
+wire. Packet capture cannot recover the link; only a socket-layer filter can.
+
+With Threat Protection disabled the same traffic correctly resolves to
+`com.apple.WebKit.Networking`, and attribution rose to 95.3%.
+
+Beholder detects a process that both dominates the flow table and reaches many distinct
+hosts, and says so, rather than quietly presenting the proxy as the culprit.
 
 **Later**
 

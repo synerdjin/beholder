@@ -177,14 +177,24 @@ final class TopView: @unchecked Sendable {
             """
         )
 
-        if summary.flowCount > 0 {
-            let attributed = summary.flowCount - summary.unattributedCount
-            let percentage = Double(attributed) / Double(summary.flowCount) * 100
+        // The miss rate is measured against flows that *could* be attributed. Protocols
+        // with no ports have no socket to match, so counting them as failures would
+        // overstate the problem and point at a fix that does not exist.
+        let attributable = summary.flowCount - summary.unattributableCount
+        if attributable > 0 {
+            let named = attributable - summary.unattributedCount
+            let percentage = Double(named) / Double(attributable) * 100
             print(
                 String(
-                    format: "Attribution: %d of %d flows named (%.1f%%), %d unknown.",
-                    attributed, summary.flowCount, percentage, summary.unattributedCount
+                    format: "Attribution: %d of %d attributable flows named (%.1f%%), %d missed.",
+                    named, attributable, percentage, summary.unattributedCount
                 )
+            )
+        }
+        if summary.unattributableCount > 0 {
+            print(
+                "\(summary.unattributableCount) flows carry no ports (ICMP and similar), "
+                    + "so no socket exists to attribute them to — these are system traffic."
             )
         }
         if summary.evictedFlowCount > 0 {
