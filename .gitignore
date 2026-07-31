@@ -1,0 +1,10 @@
+.DS_Store
+.build/
+.swiftpm/
+*.xcuserdatad
+xcuserdata/
+DerivedData/
+
+# GeoIP databases are large and separately licensed — fetched via Scripts/fetch-geoip.sh
+Resources/geoip/
+*.mmdb
