@@ -53,6 +53,8 @@ public struct WireFlow: Codable, Sendable, Identifiable, Hashable {
     public let location: GeoLocation?
     /// Who operates the far end, when a tracker database recognises it.
     public let classification: HostClassification?
+    /// The network announcing the remote address, when an ASN database is installed.
+    public let networkOperator: NetworkOperator?
     /// True when this machine opened the connection. Nil when nothing has been observed
     /// yet, which in practice never reaches a client.
     public let isOutgoing: Bool?
@@ -76,10 +78,12 @@ public struct WireFlow: Codable, Sendable, Identifiable, Hashable {
         bytesOut: UInt64, bytesIn: UInt64, packetsOut: UInt64, packetsIn: UInt64,
         tcpState: String?, firstSeen: Date, lastSeen: Date,
         location: GeoLocation?, classification: HostClassification?,
+        networkOperator: NetworkOperator?,
         isOutgoing: Bool?, initiationIsCertain: Bool
     ) {
         self.location = location
         self.classification = classification
+        self.networkOperator = networkOperator
         self.isOutgoing = isOutgoing
         self.initiationIsCertain = initiationIsCertain
         self.id = id
@@ -205,6 +209,7 @@ extension Flow {
             lastSeen: lastSeen,
             location: location,
             classification: classification,
+            networkOperator: networkOperator,
             isOutgoing: {
                 switch direction {
                 case .outgoing: return true

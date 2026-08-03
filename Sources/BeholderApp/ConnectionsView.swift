@@ -214,6 +214,7 @@ private struct FlowRow: View {
                         .font(.system(.body, design: .monospaced))
                         .lineLimit(1)
                         .truncationMode(.middle)
+                        .textSelection(.enabled)
 
                     if flow.hostName != nil && !flow.hostNameIsProof {
                         // A DNS-derived name is a good guess, not proof: one address can
@@ -245,6 +246,16 @@ private struct FlowRow: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     ClassificationBadges(classification: flow.classification)
+                    // For an address nothing could name, the network announcing it is
+                    // usually the only identification available — and is often enough to
+                    // recognise it.
+                    if flow.hostName == nil, let network = flow.networkOperator {
+                        Text(network.organization)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .help("\(network.description) — the network announcing this address")
+                    }
                 }
             }
 
@@ -253,6 +264,68 @@ private struct FlowRow: View {
         }
         .padding(.leading, 6)
         .padding(.vertical, 1)
+        .contextMenu {
+            // Text selection inside a List row is fiddly, so the reliable path is an
+            // explicit menu. Each item copies one fact rather than a formatted blob,
+            // since these get pasted into a terminal or a search box.
+            Button("Copy address") { copy(flow.remoteAddress) }
+            if let hostName = flow.hostName {
+                Button("Copy hostname") { copy(hostName) }
+            }
+            Button("Copy address and port") {
+                copy(endpointText(flow))
+            }
+            if let network = flow.networkOperator {
+                Button("Copy network") { copy(network.description) }
+            }
+            Divider()
+            Button("Copy connection details") { copy(details(flow)) }
+        }
+    }
+
+    private func copy(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    /// IPv6 addresses are bracketed so the result can be pasted somewhere that expects a
+    /// host and port without the colons becoming ambiguous.
+    private func endpointText(_ flow: WireFlow) -> String {
+        flow.remoteAddress.contains(":")
+            ? "[\(flow.remoteAddress)]:\(String(flow.remotePort))"
+            : "\(flow.remoteAddress):\(String(flow.remotePort))"
+    }
+
+    private func details(_ flow: WireFlow) -> String {
+        var lines = [
+            "process: \(flow.processName ?? "unattributed")"
+                + (flow.pid.map { " (pid \(String($0)))" } ?? ""),
+            "protocol: \(flow.transport)",
+            "remote: \(endpointText(flow))",
+        ]
+        if let hostName = flow.hostName {
+            lines.append(
+                "hostname: \(hostName)"
+                    + (flow.hostNameIsProof ? " (from TLS SNI)" : " (inferred)")
+            )
+        }
+        if let network = flow.networkOperator {
+            lines.append("network: \(network.description)")
+        }
+        if let location = flow.location, !location.description.isEmpty {
+            lines.append("location: \(location.description)")
+        }
+        if let owner = flow.classification?.owner {
+            lines.append("operator: \(owner)")
+        }
+        if let state = flow.tcpState {
+            lines.append("state: \(state)")
+        }
+        lines.append(
+            "traffic: \(formatBytes(Double(flow.bytesOut))) up, "
+                + "\(formatBytes(Double(flow.bytesIn))) down"
+        )
+        return lines.joined(separator: "\n")
     }
 }
 

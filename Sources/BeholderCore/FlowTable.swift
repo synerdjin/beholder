@@ -144,6 +144,16 @@ public final class FlowTable {
         }
     }
 
+    /// Names the network behind each remote address. Unlike naming and classification
+    /// this needs no hostname, so it reaches the addresses nothing else can identify.
+    public func applyNetworkOperators(_ lookup: (IPAddress) -> NetworkOperator?) {
+        for (key, flow) in flows where flow.networkOperator == nil {
+            if let operatorInfo = lookup(flow.key.remote) {
+                flows[key]?.networkOperator = operatorInfo
+            }
+        }
+    }
+
     /// Whether any flow is still waiting to be attributed. Drives the adaptive poll rate:
     /// there is no point walking every process's file descriptors when nothing is
     /// unresolved.

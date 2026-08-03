@@ -134,6 +134,10 @@ public struct Flow: Sendable {
     /// hostname, so this stays nil for flows that were never named.
     public var classification: HostClassification?
 
+    /// The network announcing the remote address. Needs no hostname, so this is often
+    /// the only identification available for an address nothing else can name.
+    public var networkOperator: NetworkOperator?
+
     /// Whether this machine opened the connection, rather than accepting one.
     ///
     /// Nil only before the first packet is recorded. Determining it from port numbers

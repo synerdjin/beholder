@@ -22,27 +22,33 @@ mkdir -p "${DESTINATION}"
 
 # DB-IP publishes on the first of the month. Early in a month the new file may not be up
 # yet, so fall back to the previous one rather than failing.
+# Two databases. City places an address; ASN names the network announcing it, which is
+# the only thing that works for the many cloud and CDN addresses with no PTR record and
+# no entry in any tracker list.
 try_month() {
-    local stamp="$1"
-    local url="https://download.db-ip.com/free/dbip-city-lite-${stamp}.mmdb.gz"
+    local dataset="$1" stamp="$2" out="$3"
+    local url="https://download.db-ip.com/free/dbip-${dataset}-lite-${stamp}.mmdb.gz"
     echo "Trying ${url}"
-    curl --fail --location --silent --show-error --output "${TARGET}.gz" "${url}"
+    curl --fail --location --silent --show-error --output "${out}.gz" "${url}"
+}
+
+fetch_dataset() {
+    local dataset="$1" out="$2"
+    if ! try_month "${dataset}" "${THIS_MONTH}" "${out}"; then
+        echo "Not published yet; falling back to ${LAST_MONTH}."
+        try_month "${dataset}" "${LAST_MONTH}" "${out}"
+    fi
+    gunzip --force "${out}.gz"
+    echo "  installed ${out} ($(du -h "${out}" | cut -f1))"
 }
 
 THIS_MONTH="$(date +%Y-%m)"
 LAST_MONTH="$(date -v-1m +%Y-%m 2>/dev/null || date -d '1 month ago' +%Y-%m)"
 
-if ! try_month "${THIS_MONTH}"; then
-    echo "Not published yet; falling back to ${LAST_MONTH}."
-    try_month "${LAST_MONTH}"
-fi
+fetch_dataset city "${TARGET}"
+fetch_dataset asn "${DESTINATION}/asn.mmdb"
 
-echo "Decompressing..."
-gunzip --force "${TARGET}.gz"
-
-SIZE="$(du -h "${TARGET}" | cut -f1)"
 echo
-echo "Installed ${TARGET} (${SIZE})"
 echo
 echo "This product includes GeoLite data created by DB-IP, available from"
 echo "https://db-ip.com/ and licensed under CC BY 4.0."

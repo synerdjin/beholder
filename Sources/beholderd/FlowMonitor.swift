@@ -23,6 +23,8 @@ final class FlowMonitor: @unchecked Sendable {
     /// Nil when no geolocation database is installed, which is a normal state — it is
     /// large, separately licensed, and fetched deliberately.
     private let geography = GeoIPDatabase.loadFromStandardPaths()
+    /// Names the network behind an address, which works where hostnames do not.
+    private let networks = ASNDatabase.loadFromStandardPaths()
     private var reverseResolver: ReverseResolver?
     /// Nil when no tracker index is installed. Fetched deliberately, like geolocation,
     /// because its data carries a NonCommercial licence.
@@ -260,6 +262,9 @@ final class FlowMonitor: @unchecked Sendable {
         classifyNamedFlows()
         if let geography {
             table.applyLocations { geography.location(for: $0) }
+        }
+        if let networks {
+            table.applyNetworkOperators { networks.lookup($0) }
         }
 
         // Ask about anything still nameless. Cheapest source first means this only ever

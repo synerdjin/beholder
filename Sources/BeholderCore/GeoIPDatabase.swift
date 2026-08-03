@@ -29,6 +29,77 @@ public struct GeoLocation: Sendable, Hashable, Codable {
     }
 }
 
+/// The network that announces an address: its autonomous system number and the
+/// organisation operating it.
+public struct NetworkOperator: Sendable, Hashable, Codable {
+    public let number: UInt32
+    public let organization: String
+
+    public init(number: UInt32, organization: String) {
+        self.number = number
+        self.organization = organization
+    }
+
+    public var description: String { "AS\(number) \(organization)" }
+}
+
+/// Names the network behind an address.
+///
+/// This is the answer for addresses nothing else can name. Reverse DNS frequently returns
+/// nothing — cloud and CDN addresses often have no PTR record at all — but every routable
+/// address is announced by *someone*, and the routing tables say who. It will not tell you
+/// which service you reached, only which organisation operates the network: an unnamed
+/// address turns from `103.86.99.100` into `AS136787 PacketHub S.A.`, which is enough to
+/// recognise it.
+///
+/// Not thread-safe; confine to one queue.
+public final class ASNDatabase {
+    private let database: MaxMindDatabase
+    private var cache: [IPAddress: NetworkOperator?] = [:]
+    private static let maximumCacheEntries = 32768
+
+    public var databaseType: String { database.databaseType }
+
+    public static func standardPaths() -> [String] {
+        [
+            "/usr/local/share/beholder/asn.mmdb",
+            FileManager.default.currentDirectoryPath + "/Resources/geoip/asn.mmdb",
+        ]
+    }
+
+    public static func loadFromStandardPaths() -> ASNDatabase? {
+        for path in standardPaths() where FileManager.default.fileExists(atPath: path) {
+            if let database = try? ASNDatabase(path: path) { return database }
+        }
+        return nil
+    }
+
+    public init(path: String) throws {
+        self.database = try MaxMindDatabase(path: path)
+    }
+
+    public func lookup(_ address: IPAddress) -> NetworkOperator? {
+        guard address.isGloballyRoutable else { return nil }
+        if let cached = cache[address] { return cached }
+
+        let resolved = resolve(address)
+        if cache.count >= Self.maximumCacheEntries { cache.removeAll(keepingCapacity: true) }
+        cache[address] = resolved
+        return resolved
+    }
+
+    private func resolve(_ address: IPAddress) -> NetworkOperator? {
+        guard let record = database.lookup(address) else { return nil }
+        guard
+            let organization = record["autonomous_system_organization"]?.stringValue,
+            !organization.isEmpty
+        else { return nil }
+
+        let number = record["autonomous_system_number"]?.doubleValue.map { UInt32($0) } ?? 0
+        return NetworkOperator(number: number, organization: organization)
+    }
+}
+
 /// Resolves addresses to places, from a local database.
 ///
 /// Entirely offline. A tool built to show you who your machine talks to would have no

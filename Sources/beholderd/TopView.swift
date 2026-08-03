@@ -305,6 +305,11 @@ final class TopView: @unchecked Sendable {
                     + "\(summary.namedByDNS) from observed DNS, "
                     + "\(summary.namedByReverseLookup) from reverse lookup."
             )
+            let networked = summary.flows.filter { $0.networkOperator != nil }.count
+            lines.append(
+                "  \(networked) of \(summary.flowCount) flows have a known network operator, "
+                    + "which needs no hostname."
+            )
             lines.append(
                 "  \(summary.restoredNameCount) names carried over from earlier runs; "
                     + "\(summary.reverseLookupsSucceeded) of "

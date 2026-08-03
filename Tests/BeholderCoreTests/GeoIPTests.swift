@@ -124,3 +124,57 @@ struct GeoIPTests {
         }
     }
 }
+
+private func installedASNDatabasePath() -> String? {
+    ASNDatabase.standardPaths().first { FileManager.default.fileExists(atPath: $0) }
+}
+
+/// The network behind an address, which is the only identification available for the
+/// many cloud and CDN addresses that have no PTR record and appear in no tracker list.
+@Suite("Network operator lookups", .enabled(if: installedASNDatabasePath() != nil))
+struct ASNDatabaseTests {
+
+    private func database() throws -> ASNDatabase {
+        try ASNDatabase(path: try #require(installedASNDatabasePath()))
+    }
+
+    private func address(_ text: String) throws -> IPAddress {
+        try #require(IPAddress(text: text))
+    }
+
+    @Test(
+        "Well-known addresses resolve to the right network",
+        arguments: [
+            ("8.8.8.8", "GOOGLE"),
+            ("1.1.1.1", "CLOUDFLARE"),
+            ("17.253.144.10", "APPLE"),
+        ]
+    )
+    func knownNetworks(text: String, expectedFragment: String) throws {
+        let database = try self.database()
+        let network = try #require(database.lookup(try address(text)), "no record for \(text)")
+        #expect(
+            network.organization.uppercased().contains(expectedFragment),
+            "\(text) resolved to \(network.description)"
+        )
+        #expect(network.number > 0)
+    }
+
+    /// The case this exists for: an address with no hostname, in no tracker list, that
+    /// still has an operator worth knowing. This one is a VPN DNS server.
+    @Test("An otherwise unidentifiable address still names its network")
+    func unnamedAddressStillResolves() throws {
+        let database = try self.database()
+        let network = try #require(database.lookup(try address("103.86.99.100")))
+        #expect(!network.organization.isEmpty)
+    }
+
+    @Test(
+        "Addresses with no public network are not looked up",
+        arguments: ["192.168.1.1", "127.0.0.1", "100.64.0.2"]
+    )
+    func nonRoutableAddresses(text: String) throws {
+        let database = try self.database()
+        #expect(database.lookup(try address(text)) == nil)
+    }
+}
