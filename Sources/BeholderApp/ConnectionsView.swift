@@ -1,6 +1,13 @@
 import BeholderCore
 import SwiftUI
 
+/// Counts with a correctly pluralised noun. "1 connections" is the kind of small wrongness
+/// that makes a tool feel unfinished.
+func pluralised(_ count: Int, _ singular: String, plural: String? = nil) -> String {
+    let noun = count == 1 ? singular : (plural ?? singular + "s")
+    return "\(count) \(noun)"
+}
+
 /// Byte counts, rendered the way people read them.
 func formatBytes(_ bytes: Double) -> String {
     let units = ["B", "KB", "MB", "GB", "TB"]
@@ -100,6 +107,15 @@ private struct ProcessRow: View {
     let bytesOut: UInt64
     let bytesIn: UInt64
 
+    private var subtitle: String {
+        let connections = pluralised(connectionCount, "connection")
+        guard let pid else { return "\(connections) with no identifiable owner" }
+        // String(pid) rather than interpolating the number directly: SwiftUI applies
+        // locale grouping to interpolated integers, which turned pid 1365 into "1,365".
+        // A process identifier is a name, not a quantity.
+        return "pid \(String(pid)) · \(connections)"
+    }
+
     var body: some View {
         HStack(spacing: 10) {
             Image(nsImage: ProcessIcons.icon(forPid: pid))
@@ -110,12 +126,9 @@ private struct ProcessRow: View {
                 Text(name)
                     .fontWeight(.medium)
                     .foregroundStyle(pid == nil ? .secondary : .primary)
-                Text(
-                    pid.map { "pid \($0) · \(connectionCount) connections" }
-                        ?? "\(connectionCount) connections with no identifiable owner"
-                )
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Spacer()
@@ -162,8 +175,10 @@ private struct FlowRow: View {
                             )
                     }
                 }
+                // String(port) for the same reason as the pid: a port number is an
+                // identifier, and "port 8,080" is nonsense.
                 Text(
-                    "port \(flow.remotePort)"
+                    "port \(String(flow.remotePort))"
                         + (flow.tcpState.map { " · \($0)" } ?? "")
                 )
                 .font(.caption)

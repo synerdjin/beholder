@@ -30,16 +30,32 @@ private struct MenuBarLabel: View {
     var body: some View {
         // Rates rather than totals: the menu bar answers "is anything happening right
         // now", and a running total never changes fast enough to be worth a glance.
-        let latest = client.history.last
-        HStack(spacing: 3) {
+        //
+        // Up and down are shown separately. An earlier version summed them into one bare
+        // number, which was ambiguous enough that the first person to see it had to ask
+        // what it meant — and merging the directions threw away the distinction the whole
+        // tool exists to draw.
+        HStack(spacing: 4) {
             Image(systemName: "eye")
-            if let latest {
-                Text(compactRate(latest.bytesOutPerSecond + latest.bytesInPerSecond))
-                    .font(.system(size: 10, design: .monospaced))
+            if let latest = client.history.last {
+                Text(
+                    "↑\(compactRate(latest.bytesOutPerSecond)) "
+                        + "↓\(compactRate(latest.bytesInPerSecond))"
+                )
+                .font(.system(size: 10, design: .monospaced))
+                .monospacedDigit()
             }
         }
+        .help(
+            client.history.last.map {
+                "Beholder — sending \(formatBytes($0.bytesOutPerSecond))/s, "
+                    + "receiving \(formatBytes($0.bytesInPerSecond))/s"
+            } ?? "Beholder — waiting for the capture daemon"
+        )
     }
 
+    /// Deliberately terse: the menu bar has very little room, and the exact figure with
+    /// units is one click away in the menu itself.
     private func compactRate(_ bytesPerSecond: Double) -> String {
         let units = ["B", "K", "M", "G"]
         var value = bytesPerSecond
@@ -60,9 +76,20 @@ private struct MenuBarContent: View {
 
     var body: some View {
         if let snapshot = client.snapshot {
-            Text("\(snapshot.statistics.flowCount) connections, \(snapshot.statistics.processCount) processes")
             Text(
-                "↑ \(formatBytes(Double(snapshot.statistics.totalBytesOut)))  "
+                "\(pluralised(snapshot.statistics.flowCount, "connection")), "
+                    + "\(pluralised(snapshot.statistics.processCount, "process", plural: "processes"))"
+            )
+            // The menu is where the numbers get their units, since the bar itself has no
+            // room for them.
+            if let latest = client.history.last {
+                Text(
+                    "Now: ↑ \(formatBytes(latest.bytesOutPerSecond))/s  "
+                        + "↓ \(formatBytes(latest.bytesInPerSecond))/s"
+                )
+            }
+            Text(
+                "Total: ↑ \(formatBytes(Double(snapshot.statistics.totalBytesOut)))  "
                     + "↓ \(formatBytes(Double(snapshot.statistics.totalBytesIn)))"
             )
             Divider()
