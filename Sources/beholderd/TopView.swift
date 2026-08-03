@@ -113,7 +113,7 @@ final class TopView: @unchecked Sendable {
 
         output += """
             Beholder — \(interfaces.joined(separator: ", "))\
-              ·  \(summary.flowCount) flows, \(summary.processCount) processes\
+              ·  \(pluralised(summary.flowCount, "flow")), \(pluralised(summary.processCount, "process", plural: "processes"))\
               ·  up \(formatBytes(outRate))/s  down \(formatBytes(inRate))/s
             \(formatTimestamp(now))  ·  running \(formatDuration(now.timeIntervalSince(startedAt)))
 
@@ -127,7 +127,7 @@ final class TopView: @unchecked Sendable {
                 )
             }
             if summary.evictedFlowCount > 0 {
-                notes.append("\(summary.evictedFlowCount) flows evicted (table full)")
+                notes.append("\(pluralised(summary.evictedFlowCount, "flow")) evicted (table full)")
             }
             output += notes.joined(separator: "  ·  ") + "\n"
         }
@@ -264,7 +264,7 @@ final class TopView: @unchecked Sendable {
         )
         lines.append(
             """
-            \(summary.flowCount) flows, \(summary.processCount) processes, \
+            \(pluralised(summary.flowCount, "flow")), \(pluralised(summary.processCount, "process", plural: "processes")), \
             \(formatBytes(Double(summary.totalBytesOut))) up, \
             \(formatBytes(Double(summary.totalBytesIn))) down, \
             \(summary.attributionPasses) attribution passes \
@@ -288,7 +288,7 @@ final class TopView: @unchecked Sendable {
         }
         if summary.unattributableCount > 0 {
             lines.append(
-                "\(summary.unattributableCount) flows carry no ports (ICMP and similar), "
+                "\(pluralised(summary.unattributableCount, "flow")) carry no ports (ICMP and similar), "
                     + "so no socket exists to attribute them to — these are system traffic."
             )
         }
@@ -307,11 +307,11 @@ final class TopView: @unchecked Sendable {
             )
             let networked = summary.flows.filter { $0.networkOperator != nil }.count
             lines.append(
-                "  \(networked) of \(summary.flowCount) flows have a known network operator, "
+                "  \(networked) of \(pluralised(summary.flowCount, "flow")) have a known network operator, "
                     + "which needs no hostname."
             )
             lines.append(
-                "  \(summary.restoredNameCount) names carried over from earlier runs; "
+                "  \(pluralised(summary.restoredNameCount, "name")) carried over from earlier runs; "
                     + "\(summary.reverseLookupsSucceeded) of "
                     + "\(summary.reverseLookupsAttempted) reverse lookups answered."
             )
@@ -319,7 +319,7 @@ final class TopView: @unchecked Sendable {
         if summary.privateRelayFlowCount > 0 {
             lines.append(
                 """
-                \(summary.privateRelayFlowCount) flows go through iCloud Private Relay. \
+                \(pluralised(summary.privateRelayFlowCount, "flow")) go through iCloud Private Relay. \
                 Their real destinations are encrypted end-to-end to Apple and cannot be \
                 determined from this machine — that is the feature working, not a gap in \
                 Beholder.
@@ -328,7 +328,7 @@ final class TopView: @unchecked Sendable {
         }
         if summary.evictedFlowCount > 0 {
             lines.append(
-                "\(summary.evictedFlowCount) flows were evicted — the table hit its cap, "
+                "\(pluralised(summary.evictedFlowCount, "flow")) evicted — the table hit its cap, "
                     + "so these totals are an undercount."
             )
         }

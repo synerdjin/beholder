@@ -68,8 +68,8 @@ struct ConnectionMapView: View {
                 // Says plainly how much of the picture is on the map. A map showing 40 of
                 // 200 connections without saying so implies the other 160 do not exist.
                 Text(
-                    "\(placedCount) of \(snapshot.flows.count) connections placed · "
-                        + "\(places.count) locations"
+                    "\(placedCount) of \(pluralised(snapshot.flows.count, "connection")) placed · "
+                        + pluralised(places.count, "location")
                 )
                 .font(.caption)
                 .padding(6)

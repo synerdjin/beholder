@@ -1,9 +1,14 @@
 import BeholderCore
 import SwiftUI
 
-/// Counts with a correctly pluralised noun. "1 connections" is the kind of small wrongness
-/// that makes a tool feel unfinished.
-func pluralised(_ count: Int, _ singular: String, plural: String? = nil) -> String {
+/// Counts with a correctly pluralised noun.
+///
+/// "1 connections" is the kind of small wrongness that makes a tool feel unfinished, and
+/// it appears wherever a normally-large count happens to be one. Generic over integer
+/// width because these counts arrive as both `Int` and `UInt64`.
+func pluralised(
+    _ count: some BinaryInteger, _ singular: String, plural: String? = nil
+) -> String {
     let noun = count == 1 ? singular : (plural ?? singular + "s")
     return "\(count) \(noun)"
 }

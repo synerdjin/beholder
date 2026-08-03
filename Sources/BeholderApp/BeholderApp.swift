@@ -314,7 +314,7 @@ private struct HeaderView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .help(
-                            "\(snapshot.statistics.unattributedCount) connections could not be "
+                            "\(pluralised(snapshot.statistics.unattributedCount, "connection")) could not be "
                                 + "traced to a process — usually very short-lived sockets."
                         )
                 }
@@ -386,7 +386,7 @@ private struct WarningsView: View {
             result.append(
                 (
                     "exclamationmark.triangle.fill",
-                    "\(statistics.packetsDropped) packets were dropped by the kernel, so "
+                    "\(pluralised(statistics.packetsDropped, "packet")) dropped by the kernel, so "
                         + "these totals are an undercount."
                 )
             )
@@ -395,7 +395,7 @@ private struct WarningsView: View {
             result.append(
                 (
                     "tray.full",
-                    "\(statistics.evictedFlowCount) connections were evicted because the "
+                    "\(pluralised(statistics.evictedFlowCount, "connection")) evicted because the "
                         + "table is full, so these totals are an undercount."
                 )
             )
@@ -404,7 +404,7 @@ private struct WarningsView: View {
             result.append(
                 (
                     "lock.shield",
-                    "\(statistics.privateRelayFlowCount) connections go through iCloud "
+                    "\(pluralised(statistics.privateRelayFlowCount, "connection")) going through iCloud "
                         + "Private Relay. Their real destinations are encrypted end-to-end "
                         + "to Apple and cannot be determined from this machine."
                 )
