@@ -260,3 +260,51 @@ struct FlowStoreTests {
         }
     }
 }
+
+/// Regression: the list filter keyed on "recognised by the tracker database". Once the
+/// ASN lookup landed, almost nothing was in that database and almost everything had a
+/// network operator, so the filter kept practically every flow and read as broken.
+@Suite("Identification")
+struct IdentificationTests {
+
+    private func wireFlow(
+        hostName: String? = nil,
+        company: String? = nil,
+        network: String? = nil
+    ) -> WireFlow {
+        WireFlow(
+            id: "x", processName: nil, processPath: nil, pid: nil,
+            transport: "TCP", localAddress: "10.0.0.1", localPort: 50000,
+            remoteAddress: "1.2.3.4", remotePort: 443,
+            hostName: hostName, hostNameIsProof: false, isPrivateRelay: false,
+            bytesOut: 0, bytesIn: 0, packetsOut: 0, packetsIn: 0,
+            tcpState: nil, firstSeen: Date(), lastSeen: Date(),
+            location: nil,
+            classification: company.map { HostClassification(owner: $0) },
+            networkOperator: network.map { NetworkOperator(number: 1, organization: $0) },
+            isOutgoing: true, initiationIsCertain: true
+        )
+    }
+
+    @Test("Any one source counts as identification")
+    func anySourceIdentifies() {
+        #expect(wireFlow(hostName: "example.com").isIdentified)
+        #expect(wireFlow(company: "Google").isIdentified)
+        #expect(wireFlow(network: "CLOUDFLARE").isIdentified)
+    }
+
+    /// The set worth isolating: an address, a port, and nothing else.
+    @Test("A flow with no name, company or network is unidentified")
+    func nothingKnownIsUnidentified() {
+        #expect(!wireFlow().isIdentified)
+    }
+
+    /// The precise case that made the old filter useless — a host in no tracker list but
+    /// with a perfectly good network operator is identified, not a mystery.
+    @Test("A host absent from every tracker list is still identified by its network")
+    func trackerAbsenceIsNotMystery() {
+        let flow = wireFlow(network: "PacketHub S.A.")
+        #expect(flow.classification?.owner == nil)
+        #expect(flow.isIdentified)
+    }
+}

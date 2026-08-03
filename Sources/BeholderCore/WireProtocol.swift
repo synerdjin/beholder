@@ -70,6 +70,21 @@ public struct WireFlow: Codable, Sendable, Identifiable, Hashable {
         hostName ?? remoteAddress
     }
 
+    /// Whether anything at all is known about the far end beyond its address.
+    ///
+    /// Three independent sources feed this, and any one of them counts: a hostname, the
+    /// company a tracker database attributes it to, or the network announcing it. What is
+    /// left over is the genuinely opaque set — an address, a port, and nothing else — and
+    /// that is the set worth looking at.
+    ///
+    /// Deliberately broader than "recognised by the tracker database". Since the ASN
+    /// lookup landed, almost nothing is in that database and almost everything has an
+    /// operator, so filtering on tracker recognition alone kept practically every flow
+    /// and looked like it was doing nothing at all.
+    public var isIdentified: Bool {
+        hostName != nil || classification?.owner != nil || networkOperator != nil
+    }
+
     public init(
         id: String, processName: String?, processPath: String?, pid: Int32?,
         transport: String, localAddress: String, localPort: UInt16,

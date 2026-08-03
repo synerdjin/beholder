@@ -155,7 +155,7 @@ private struct MainView: View {
     let client: FlowClient
     @State private var presentation: Presentation = .connections
     @State private var grouping: Grouping = .process
-    @State private var unrecognisedOnly = false
+    @State private var unidentifiedOnly = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -169,12 +169,16 @@ private struct MainView: View {
                 WarningsView(statistics: snapshot.statistics)
                 switch presentation {
                 case .connections:
-                    GroupingBar(grouping: $grouping, unrecognisedOnly: $unrecognisedOnly)
+                    GroupingBar(
+                        grouping: $grouping,
+                        unidentifiedOnly: $unidentifiedOnly,
+                        snapshot: snapshot
+                    )
                     Divider()
                     ConnectionsView(
                         snapshot: snapshot,
                         grouping: $grouping,
-                        unrecognisedOnly: $unrecognisedOnly
+                        unidentifiedOnly: $unidentifiedOnly
                     )
                 case .map:
                     ConnectionMapView(snapshot: snapshot)

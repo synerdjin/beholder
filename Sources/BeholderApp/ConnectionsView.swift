@@ -43,7 +43,7 @@ enum Grouping: String, CaseIterable, Identifiable {
 struct ConnectionsView: View {
     let snapshot: FlowSnapshot
     @Binding var grouping: Grouping
-    @Binding var unrecognisedOnly: Bool
+    @Binding var unidentifiedOnly: Bool
     @State private var expanded: Set<String> = []
     @State private var searchText = ""
 
@@ -77,8 +77,8 @@ struct ConnectionsView: View {
             }
         }
 
-        if unrecognisedOnly {
-            matching = matching.filter { $0.classification?.isRecognised != true }
+        if unidentifiedOnly {
+            matching = matching.filter { !$0.isIdentified }
         }
 
         var buckets: [String: [WireFlow]] = [:]

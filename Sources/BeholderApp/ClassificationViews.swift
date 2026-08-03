@@ -1,10 +1,15 @@
 import BeholderCore
 import SwiftUI
 
-/// Grouping choice and the unrecognised filter.
+/// Grouping choice and the filter for connections nothing could identify.
 struct GroupingBar: View {
     @Binding var grouping: Grouping
-    @Binding var unrecognisedOnly: Bool
+    @Binding var unidentifiedOnly: Bool
+    let snapshot: FlowSnapshot
+
+    private var unidentifiedCount: Int {
+        snapshot.flows.filter { !$0.isIdentified }.count
+    }
 
     var body: some View {
         HStack(spacing: 12) {
@@ -17,15 +22,27 @@ struct GroupingBar: View {
             .labelsHidden()
             .fixedSize()
 
-            Toggle("Only unrecognised", isOn: $unrecognisedOnly)
-                .toggleStyle(.checkbox)
-                .help(
-                    "Hosts no tracker database lists. Most are ordinary content delivery "
-                        + "endpoints — this narrows the list, it does not mark anything as "
-                        + "suspicious."
-                )
+            Toggle(isOn: $unidentifiedOnly) {
+                // The count travels with the control. Without it a filter that removes
+                // nothing is indistinguishable from a filter that does not work — which
+                // is exactly how the previous one read.
+                Text("Only unidentified (\(unidentifiedCount))")
+                    .foregroundStyle(unidentifiedCount == 0 ? .secondary : .primary)
+            }
+            .toggleStyle(.checkbox)
+            .disabled(unidentifiedCount == 0 && !unidentifiedOnly)
+            .help(
+                "Connections with no hostname, no known company and no known network — "
+                    + "an address and a port and nothing else. Usually local or "
+                    + "carrier-internal addresses that no database can describe. Narrowing "
+                    + "to these is not a claim that any of them is suspicious."
+            )
 
             Spacer()
+
+            Text("\(snapshot.flows.count - unidentifiedCount) of \(pluralised(snapshot.flows.count, "connection")) identified")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
