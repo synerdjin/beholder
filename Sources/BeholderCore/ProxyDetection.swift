@@ -24,28 +24,20 @@ public enum ProxyDetection {
         public let distinctRemoteHosts: Int
         public let shareOfFlows: Double
         public let bytes: UInt64
-        /// True when the executable lives in a system-extension bundle, which makes a
-        /// proxy interpretation much more likely than a merely chatty application.
+        /// Always true: a finding is only raised for system-level components. Kept
+        /// explicit because it is the load-bearing part of the judgement.
         public let isSystemExtension: Bool
 
         public var advice: String {
-            let name = owner.name
-            if isSystemExtension {
-                return """
-                    \(name) owns \(flowCount) flows (\(Int(shareOfFlows * 100))% of all \
-                    traffic) to \(distinctRemoteHosts) different hosts, and runs as a \
-                    system extension. It is almost certainly a transparent proxy \
-                    re-originating other applications' connections, which means the \
-                    processes that actually made these requests cannot be identified \
-                    from captured packets. Disable that extension's filtering to see \
-                    real per-application attribution.
-                    """
-            }
-            return """
-                \(name) owns \(flowCount) flows (\(Int(shareOfFlows * 100))% of all \
-                traffic) to \(distinctRemoteHosts) different hosts. If it is a proxy, \
-                the applications behind it cannot be identified from captured packets.
-                """
+            """
+            \(owner.name) owns \(flowCount) flows (\(Int(shareOfFlows * 100))% of \
+            application traffic) to \(distinctRemoteHosts) different hosts, and runs as a \
+            system extension or privileged helper. It is almost certainly a transparent \
+            proxy re-originating other applications' connections, which means the \
+            processes that actually made these requests cannot be identified from \
+            captured packets. Disable that extension's filtering to see real \
+            per-application attribution.
+            """
         }
     }
 
@@ -56,8 +48,37 @@ public enum ProxyDetection {
     static let flowShareThreshold = 0.30
     static let distinctHostThreshold = 8
 
+    /// Ports belonging to network infrastructure rather than to anything a user opened.
+    ///
+    /// Excluding these is what separates a proxy from a resolver. `mDNSResponder` talks
+    /// to every DNS server and multicast group on the network and can easily own a third
+    /// of all flows — but it is resolving names, not carrying anybody's payload. An
+    /// earlier version flagged it as a transparent proxy, which is precisely the
+    /// false positive that teaches a user to ignore the warning.
+    static let infrastructurePorts: Set<UInt16> = [
+        53,  // DNS
+        5353,  // multicast DNS
+        853,  // DNS over TLS
+        67, 68,  // DHCP
+        123,  // NTP
+        137, 138, 139,  // NetBIOS
+        1900,  // SSDP
+        5355,  // LLMNR
+    ]
+
+    /// Flows that a transparent proxy would plausibly be carrying on someone's behalf:
+    /// out to the internet, on a port an application would actually use.
+    static func proxyCandidateFlows(_ flows: [Flow]) -> [Flow] {
+        flows.filter { flow in
+            flow.owner != nil
+                && flow.key.remote.isGloballyRoutable
+                && !infrastructurePorts.contains(flow.key.remotePort)
+                && flow.key.transport.hasPorts
+        }
+    }
+
     public static func findLikelyProxies(in flows: [Flow]) -> [Finding] {
-        let attributed = flows.filter { $0.owner != nil }
+        let attributed = proxyCandidateFlows(flows)
         guard attributed.count >= 20 else { return [] }
 
         var flowsByOwner: [ProcessOwner: [Flow]] = [:]
@@ -67,6 +88,18 @@ public enum ProxyDetection {
         }
 
         return flowsByOwner.compactMap { owner, ownedFlows -> Finding? in
+            // A system-level component fronting traffic is the load-bearing signal, and
+            // it is required rather than merely weighted.
+            //
+            // Volume alone cannot distinguish a proxy from a browser: both talk to many
+            // hosts, and on a quiet machine a browser is trivially the majority of
+            // application traffic. Warning about Safari every session would train the
+            // user to ignore the warning, which costs more than the rare userspace proxy
+            // this misses — and a userspace proxy is one the user configured and knows
+            // about, whereas a system extension quietly rewriting attribution is exactly
+            // the case worth flagging.
+            guard looksLikeSystemExtension(owner.path) else { return nil }
+
             let hosts = Set(ownedFlows.map(\.key.remote))
             let share = Double(ownedFlows.count) / Double(attributed.count)
 
@@ -85,9 +118,13 @@ public enum ProxyDetection {
         .sorted { $0.flowCount > $1.flowCount }
     }
 
+    /// Whether a path belongs to a system-level component rather than a user application.
+    /// A macOS transparent proxy has to be one of these — `NETransparentProxyProvider`
+    /// runs in a system extension, and the older approach used a privileged helper.
     static func looksLikeSystemExtension(_ path: String) -> Bool {
         path.contains(".systemextension/")
             || path.hasPrefix("/Library/SystemExtensions/")
             || path.contains(".appex/")
+            || path.hasPrefix("/Library/PrivilegedHelperTools/")
     }
 }

@@ -326,15 +326,23 @@ struct NameResolutionCacheTests {
         #expect(cache.name(for: address) == "example.com")
     }
 
+    /// The `.apple-dns.net` and `apple-relay.*` names here were all observed on a live
+    /// machine; an earlier version matched only `mask*.icloud.com` and missed every one.
     @Test(
-        "Private Relay ingress is recognised",
+        "Private Relay ingress and egress are recognised",
         arguments: [
             ("mask.icloud.com", EndpointKind.privateRelay),
             ("mask-h2.icloud.com", EndpointKind.privateRelay),
             ("mask-api.icloud.com", EndpointKind.privateRelay),
+            ("mask.apple-dns.net", EndpointKind.privateRelay),
+            ("mask-h2.apple-dns.net", EndpointKind.privateRelay),
+            ("apple-relay.fastly-edge.com", EndpointKind.privateRelay),
+            ("apple-relay.cloudflare.com", EndpointKind.privateRelay),
+            ("usw.apple-relay.fastly-edge.com", EndpointKind.privateRelay),
             ("www.icloud.com", EndpointKind.ordinary),
             ("example.com", EndpointKind.ordinary),
             ("mask.example.com", EndpointKind.ordinary),
+            ("notapple-relay.example.com", EndpointKind.ordinary),
         ]
     )
     func privateRelayClassification(hostName: String, expected: EndpointKind) {

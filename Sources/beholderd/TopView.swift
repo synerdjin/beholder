@@ -125,7 +125,7 @@ final class TopView: @unchecked Sendable {
     private static func describeRemote(_ flow: Flow) -> String {
         let port = flow.key.remotePort
         guard let hostName = flow.hostName else {
-            return "\(flow.key.remote):\(port)"
+            return flow.key.remote.endpoint(port: port)
         }
         if NameResolutionCache.classify(hostName: hostName) == .privateRelay {
             return "\(hostName):\(port)  [Private Relay]"
@@ -264,9 +264,9 @@ final class TopView: @unchecked Sendable {
             print("Unattributed flows (\(unknown.count)):")
             for flow in unknown.prefix(15) {
                 print(
-                    "  \(Column.left(flow.key.transport.name, 5))"
-                        + "\(flow.key.local):\(flow.key.localPort) → "
-                        + "\(flow.key.remote):\(flow.key.remotePort)  "
+                    "  \(Column.left(flow.key.transport.name, 7))"
+                        + "\(flow.key.local.endpoint(port: flow.key.localPort)) → "
+                        + "\(flow.key.remote.endpoint(port: flow.key.remotePort))  "
                         + "\(flow.totalPackets) packets, "
                         + formatBytes(Double(flow.totalBytes))
                 )

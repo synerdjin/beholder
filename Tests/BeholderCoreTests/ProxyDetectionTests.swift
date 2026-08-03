@@ -134,6 +134,93 @@ struct ProxyDetectionTests {
         #expect(ProxyDetection.findLikelyProxies(in: flows).isEmpty)
     }
 
+    /// Regression: a live run flagged mDNSResponder as a transparent proxy. It owned 36%
+    /// of all flows across 13 hosts because it is the system resolver — it talks to every
+    /// DNS server and multicast group there is. Flagging it is the exact false positive
+    /// that teaches a user to ignore the warning.
+    @Test("The system resolver is not mistaken for a proxy")
+    func systemResolverIsNotAProxy() {
+        let resolver = ProcessOwner(pid: 645, path: "/usr/sbin/mDNSResponder")
+        var flows: [Flow] = []
+
+        // Resolver traffic: many hosts, but all of it on infrastructure ports.
+        for index in 0..<40 {
+            flows.append(
+                flow(
+                    remoteLastOctet: UInt8(index), port: 53, owner: resolver,
+                    localPort: UInt16(50000 + index)
+                )
+            )
+            flows.append(
+                flow(
+                    remoteLastOctet: UInt8(index), port: 5353, owner: resolver,
+                    localPort: UInt16(51000 + index)
+                )
+            )
+        }
+        // A modest amount of ordinary application traffic alongside it.
+        for index in 0..<25 {
+            flows.append(
+                flow(
+                    remoteLastOctet: UInt8(100 + index), owner: browser,
+                    localPort: UInt16(60000 + index)
+                )
+            )
+        }
+
+        let findings = ProxyDetection.findLikelyProxies(in: flows)
+        #expect(!findings.contains { $0.owner == resolver })
+        #expect(findings.isEmpty)
+    }
+
+    /// Regression: with resolver noise filtered out, a browser became 100% of remaining
+    /// traffic and got flagged. On a quiet machine that is the normal state of affairs,
+    /// so volume alone can never be the test.
+    @Test("A browser dominating application traffic is not flagged")
+    func dominantBrowserIsNotAProxy() {
+        let flows = (0..<40).map {
+            flow(remoteLastOctet: UInt8($0), owner: browser, localPort: UInt16(50000 + $0))
+        }
+        #expect(ProxyDetection.findLikelyProxies(in: flows).isEmpty)
+    }
+
+    /// The counterpart: filtering out infrastructure ports must not blind the check to a
+    /// genuine proxy, which by definition carries traffic on application ports.
+    @Test("A real proxy is still caught once resolver noise is filtered out")
+    func realProxyStillDetectedAlongsideResolverNoise() throws {
+        let resolver = ProcessOwner(pid: 645, path: "/usr/sbin/mDNSResponder")
+        var flows: [Flow] = []
+
+        for index in 0..<40 {
+            flows.append(
+                flow(
+                    remoteLastOctet: UInt8(index), port: 53, owner: resolver,
+                    localPort: UInt16(50000 + index)
+                )
+            )
+        }
+        for index in 0..<30 {
+            flows.append(
+                flow(
+                    remoteLastOctet: UInt8(index), owner: shield,
+                    localPort: UInt16(52000 + index)
+                )
+            )
+        }
+        for index in 0..<10 {
+            flows.append(
+                flow(
+                    remoteLastOctet: UInt8(100 + index), owner: browser,
+                    localPort: UInt16(60000 + index)
+                )
+            )
+        }
+
+        let findings = ProxyDetection.findLikelyProxies(in: flows)
+        #expect(findings.count == 1)
+        #expect(try #require(findings.first).owner == shield)
+    }
+
     @Test(
         "System-extension paths are recognised",
         arguments: [

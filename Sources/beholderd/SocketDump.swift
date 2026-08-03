@@ -34,8 +34,8 @@ enum SocketDump {
                     pid: entry.owner.pid,
                     proto: key.isTCP ? "TCP" : "UDP",
                     state: entry.tcpState.map(String.init(describing:)) ?? "-",
-                    local: "\(key.local):\(key.localPort)",
-                    remote: "\(key.remote):\(key.remotePort)"
+                    local: key.local.endpoint(port: key.localPort),
+                    remote: key.remote.endpoint(port: key.remotePort)
                 )
             }
             .sorted { ($0.name.lowercased(), $0.local) < ($1.name.lowercased(), $1.local) }

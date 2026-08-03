@@ -94,6 +94,15 @@ public struct IPAddress: Hashable, Sendable, CustomStringConvertible {
         return rendered == nil ? "<invalid>" : String(nullTerminated: text)
     }
 
+    /// Renders an address with its port.
+    ///
+    /// IPv6 addresses must be bracketed, because they contain colons themselves:
+    /// `2607:f8b0:4020:c0b::64:443` is genuinely ambiguous about where the address ends
+    /// and the port begins, while `[2607:f8b0:4020:c0b::64]:443` is not.
+    public func endpoint(port: UInt16) -> String {
+        family == .v6 ? "[\(self)]:\(port)" : "\(self):\(port)"
+    }
+
     /// True for addresses that never leave the machine or the local network. Used to
     /// separate "my laptop talked to the internet" from LAN and loopback chatter.
     public var isLoopback: Bool {

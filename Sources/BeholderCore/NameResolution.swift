@@ -102,18 +102,30 @@ public final class NameResolutionCache {
 
     /// Classifies an endpoint from its hostname.
     ///
-    /// iCloud Private Relay bootstraps through `mask.icloud.com` / `mask-h2.icloud.com`,
-    /// and that lookup happens in the clear, so watching DNS is enough to recognise the
-    /// ingress. Worth labelling explicitly: under Private Relay, Safari's real
-    /// destinations are unknowable from this machine by design, and showing a bare Apple
-    /// address invites the user to think Beholder is broken.
+    /// Worth labelling explicitly: under Private Relay the real destination is
+    /// unknowable from this machine by design, and showing a bare Apple address invites
+    /// the user to think Beholder is broken.
+    ///
+    /// Recognising it needs more than one pattern. Observed on a live machine:
+    /// `mask.apple-dns.net` and `mask-h2.apple-dns.net` for the ingress, and
+    /// `apple-relay.fastly-edge.com` / `apple-relay.cloudflare.com` for the egress
+    /// partners that carry the second hop. An earlier version matched only
+    /// `mask*.icloud.com` and missed every one of them.
     public static func classify(hostName: String?) -> EndpointKind {
         guard let hostName else { return .ordinary }
-        let lowercased = hostName.lowercased()
-        guard lowercased.hasSuffix(".icloud.com") || lowercased == "icloud.com" else {
-            return .ordinary
+        let name = hostName.lowercased()
+
+        // Ingress: mask… on either of Apple's two relay domains.
+        if name.hasPrefix("mask") {
+            if name.hasSuffix(".icloud.com") || name.hasSuffix(".apple-dns.net") {
+                return .privateRelay
+            }
         }
-        return lowercased.hasPrefix("mask") ? .privateRelay : .ordinary
+        // Egress partners, which Apple names explicitly.
+        if name.hasPrefix("apple-relay.") || name.contains(".apple-relay.") {
+            return .privateRelay
+        }
+        return .ordinary
     }
 }
 
