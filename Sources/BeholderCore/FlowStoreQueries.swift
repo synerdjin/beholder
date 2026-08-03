@@ -2,7 +2,7 @@ import CBeholderShim
 import Foundation
 
 /// One historical conversation, read back out.
-public struct HistoricalFlow: Sendable, Equatable {
+public struct HistoricalFlow: Sendable, Equatable, Hashable {
     public let firstSeen: Date
     public let lastSeen: Date
     public let transport: String

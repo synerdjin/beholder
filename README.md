@@ -295,11 +295,17 @@ over TLS — only the person using the machine can judge which they mind. Being
 Finished connections are written to a SQLite database as they retire, so the picture
 survives the daemon stopping.
 
+The app has a **History** tab, and there are command-line equivalents:
+
 ```bash
 make history           # the last day
 make history-week      # the last week
 make history-csv       # export
 ```
+
+The History tab reads the database directly rather than asking the daemon, so it works
+when nothing is capturing — which is exactly when you want to look at it. It opens the
+file read-only, so a viewer can never alter what was recorded.
 
 Querying needs no root and no running capture. `--match` filters on app, host, address,
 company or network — the same fields the live view searches, so a query learned in one

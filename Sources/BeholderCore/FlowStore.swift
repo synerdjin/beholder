@@ -54,21 +54,34 @@ public final class FlowStore {
         BeholderPaths.historyDatabase()
     }
 
-    public init(path: String) throws {
+    /// Opens the database.
+    ///
+    /// `readOnly` is what a viewer wants: it neither creates the file nor runs a
+    /// migration, so an app looking at history can never alter what the daemon recorded,
+    /// and opening a database that does not exist fails plainly instead of silently
+    /// creating an empty one that looks like a run with no traffic.
+    public init(path: String, readOnly: Bool = false) throws {
         self.path = path
-        try FileManager.default.createDirectory(
-            atPath: (path as NSString).deletingLastPathComponent,
-            withIntermediateDirectories: true
-        )
+        if !readOnly {
+            try FileManager.default.createDirectory(
+                atPath: (path as NSString).deletingLastPathComponent,
+                withIntermediateDirectories: true
+            )
+        }
 
         var database: OpaquePointer?
-        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
+        let flags =
+            readOnly
+            ? SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
+            : SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
         guard sqlite3_open_v2(path, &database, flags, nil) == SQLITE_OK, let database else {
             let message = database.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown"
             sqlite3_close(database)
             throw StoreError.cannotOpen(path: path, message: message)
         }
         self.handle = database
+
+        guard !readOnly else { return }
 
         // The file lists everywhere this machine has been, so it gets the same treatment
         // as the transcript and the socket: owner-only, and owned by the real user rather

@@ -141,12 +141,14 @@ private struct MenuBarContent: View {
 private enum Presentation: String, CaseIterable, Identifiable {
     case connections = "Connections"
     case map = "Map"
+    case history = "History"
     var id: String { rawValue }
 
     var symbol: String {
         switch self {
         case .connections: return "list.bullet"
         case .map: return "globe"
+        case .history: return "clock.arrow.circlepath"
         }
     }
 }
@@ -156,10 +158,17 @@ private struct MainView: View {
     @State private var presentation: Presentation = .connections
     @State private var grouping: Grouping = .process
     @State private var unidentifiedOnly = false
+    @State private var history = HistoryModel()
 
     var body: some View {
         VStack(spacing: 0) {
-            if let snapshot = client.snapshot {
+            // History reads the database directly and needs no daemon, so it works even
+            // when nothing is capturing — which is exactly when you want to look at it.
+            if presentation == .history {
+                HistoryHeader(presentation: $presentation)
+                Divider()
+                HistoryView(model: history)
+            } else if let snapshot = client.snapshot {
                 HeaderView(
                     snapshot: snapshot,
                     history: client.history,
@@ -182,11 +191,39 @@ private struct MainView: View {
                     )
                 case .map:
                     ConnectionMapView(snapshot: snapshot)
+                case .history:
+                    // Handled above; history needs no live snapshot.
+                    EmptyView()
                 }
             } else {
-                WaitingView(state: client.state)
+                VStack(spacing: 0) {
+                    HistoryHeader(presentation: $presentation)
+                    Divider()
+                    WaitingView(state: client.state)
+                }
             }
         }
+    }
+}
+
+/// The view switcher on its own, for the screens that have no live snapshot to summarise.
+private struct HistoryHeader: View {
+    @Binding var presentation: Presentation
+
+    var body: some View {
+        HStack {
+            Text("Beholder").font(.headline)
+            Spacer()
+            Picker("View", selection: $presentation) {
+                ForEach(Presentation.allCases) { option in
+                    Label(option.rawValue, systemImage: option.symbol).tag(option)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+        }
+        .padding(12)
     }
 }
 
