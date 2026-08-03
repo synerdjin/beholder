@@ -49,6 +49,13 @@ public struct WireFlow: Codable, Sendable, Identifiable, Hashable {
     public let firstSeen: Date
     public let lastSeen: Date
 
+    /// True when this machine opened the connection. Nil when nothing has been observed
+    /// yet, which in practice never reaches a client.
+    public let isOutgoing: Bool?
+    /// True when `isOutgoing` came from watching the opening handshake rather than being
+    /// inferred from which direction moved first.
+    public let initiationIsCertain: Bool
+
     public var totalBytes: UInt64 { bytesOut + bytesIn }
 
     /// What to show for the far end: the hostname when known, the address otherwise.
@@ -63,8 +70,11 @@ public struct WireFlow: Codable, Sendable, Identifiable, Hashable {
         remoteAddress: String, remotePort: UInt16,
         hostName: String?, hostNameIsProof: Bool, isPrivateRelay: Bool,
         bytesOut: UInt64, bytesIn: UInt64, packetsOut: UInt64, packetsIn: UInt64,
-        tcpState: String?, firstSeen: Date, lastSeen: Date
+        tcpState: String?, firstSeen: Date, lastSeen: Date,
+        isOutgoing: Bool?, initiationIsCertain: Bool
     ) {
+        self.isOutgoing = isOutgoing
+        self.initiationIsCertain = initiationIsCertain
         self.id = id
         self.processName = processName
         self.processPath = processPath
@@ -92,6 +102,11 @@ public struct WireFlow: Codable, Sendable, Identifiable, Hashable {
 public struct WireStatistics: Codable, Sendable, Hashable {
     public var flowCount = 0
     public var processCount = 0
+    /// Connections this machine opened, and connections it accepted. Reported separately
+    /// because "something on my laptop reached out" and "something reached in" are very
+    /// different facts, and a single total hides which happened.
+    public var outgoingCount = 0
+    public var incomingCount = 0
     public var unattributedCount = 0
     public var unattributableCount = 0
     public var namedFlowCount = 0
@@ -177,7 +192,9 @@ extension Flow {
             packetsIn: packetsIn,
             tcpState: tcpState.map(String.init(describing:)),
             firstSeen: firstSeen,
-            lastSeen: lastSeen
+            lastSeen: lastSeen,
+            isOutgoing: initiatedLocally,
+            initiationIsCertain: initiationIsCertain
         )
     }
 }

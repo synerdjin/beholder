@@ -28,30 +28,34 @@ private struct MenuBarLabel: View {
     let client: FlowClient
 
     var body: some View {
-        // Rates rather than totals: the menu bar answers "is anything happening right
-        // now", and a running total never changes fast enough to be worth a glance.
-        //
-        // Up and down are shown separately. An earlier version summed them into one bare
-        // number, which was ambiguous enough that the first person to see it had to ask
-        // what it meant — and merging the directions threw away the distinction the whole
-        // tool exists to draw.
+        // The count of connections this machine has opened. Byte rates were harder to
+        // read at a glance — they change every second and carry a unit — whereas "how
+        // many things is my laptop talking to" is a single number that means something
+        // on its own. The rates are still a click away in the menu.
         HStack(spacing: 4) {
             Image(systemName: "eye")
-            if let latest = client.history.last {
-                Text(
-                    "↑\(compactRate(latest.bytesOutPerSecond)) "
-                        + "↓\(compactRate(latest.bytesInPerSecond))"
-                )
-                .font(.system(size: 10, design: .monospaced))
-                .monospacedDigit()
+            if let statistics = client.snapshot?.statistics {
+                Text("↗\(String(statistics.outgoingCount))")
+                    .font(.system(size: 11, design: .monospaced))
+                    .monospacedDigit()
             }
         }
-        .help(
-            client.history.last.map {
-                "Beholder — sending \(formatBytes($0.bytesOutPerSecond))/s, "
-                    + "receiving \(formatBytes($0.bytesInPerSecond))/s"
-            } ?? "Beholder — waiting for the capture daemon"
-        )
+        .help(helpText)
+    }
+
+    private var helpText: String {
+        guard let statistics = client.snapshot?.statistics else {
+            return "Beholder — waiting for the capture daemon"
+        }
+        var text = "Beholder — \(pluralised(statistics.outgoingCount, "outgoing connection"))"
+        if statistics.incomingCount > 0 {
+            text += ", \(statistics.incomingCount) incoming"
+        }
+        if let latest = client.history.last {
+            text += "\n↑ \(formatBytes(latest.bytesOutPerSecond))/s"
+                + "  ↓ \(formatBytes(latest.bytesInPerSecond))/s"
+        }
+        return text
     }
 
     /// Deliberately terse: the menu bar has very little room, and the exact figure with
@@ -77,8 +81,12 @@ private struct MenuBarContent: View {
     var body: some View {
         if let snapshot = client.snapshot {
             Text(
-                "\(pluralised(snapshot.statistics.flowCount, "connection")), "
-                    + "\(pluralised(snapshot.statistics.processCount, "process", plural: "processes"))"
+                "\(pluralised(snapshot.statistics.outgoingCount, "outgoing connection"))"
+                    + (snapshot.statistics.incomingCount > 0
+                        ? ", \(snapshot.statistics.incomingCount) incoming" : "")
+            )
+            Text(
+                "\(pluralised(snapshot.statistics.processCount, "process", plural: "processes"))"
             )
             // The menu is where the numbers get their units, since the bar itself has no
             // room for them.
@@ -245,8 +253,10 @@ private struct HeaderView: View {
                 Text(snapshot.interfaces.joined(separator: ", "))
                     .font(.headline)
                 Text(
-                    "\(snapshot.statistics.flowCount) connections · "
-                        + "\(snapshot.statistics.processCount) processes"
+                    "\(pluralised(snapshot.statistics.outgoingCount, "outgoing connection"))"
+                        + (snapshot.statistics.incomingCount > 0
+                            ? " · \(snapshot.statistics.incomingCount) incoming" : "")
+                        + " · \(pluralised(snapshot.statistics.processCount, "process", plural: "processes"))"
                 )
                 .foregroundStyle(.secondary)
 

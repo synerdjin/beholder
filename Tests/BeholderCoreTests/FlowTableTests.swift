@@ -135,6 +135,82 @@ struct FlowTableTests {
         #expect(table.activeFlows()[0].isClosing)
     }
 
+    /// The direction of the opening SYN is what makes a connection outgoing, not the
+    /// port numbers — plenty of services listen on high ports.
+    @Test("An outbound SYN marks the connection as one we opened")
+    func outboundSynMeansOutgoing() throws {
+        let table = FlowTable()
+        table.record(
+            packet(from: laptop, port: 51234, to: server, port: 443, flags: .syn),
+            interfaceName: "utun8", localAddresses: localAddresses
+        )
+        let flow = try #require(table.activeFlows().first)
+        #expect(flow.initiatedLocally == true)
+        #expect(flow.initiationIsCertain)
+    }
+
+    @Test("An inbound SYN marks the connection as one we accepted")
+    func inboundSynMeansIncoming() throws {
+        let table = FlowTable()
+        table.record(
+            packet(from: server, port: 51234, to: laptop, port: 8080, flags: .syn),
+            interfaceName: "en0", localAddresses: localAddresses
+        )
+        let flow = try #require(table.activeFlows().first)
+        #expect(flow.initiatedLocally == false)
+        #expect(flow.initiationIsCertain)
+    }
+
+    /// A SYN-ACK travels back the other way. Letting it overwrite the verdict would
+    /// invert every connection's direction.
+    @Test("The reply handshake does not flip the verdict")
+    func synAckDoesNotOverwrite() throws {
+        let table = FlowTable()
+        table.record(
+            packet(from: laptop, port: 51234, to: server, port: 443, flags: .syn),
+            interfaceName: "utun8", localAddresses: localAddresses
+        )
+        table.record(
+            packet(from: server, port: 443, to: laptop, port: 51234, flags: [.syn, .ack]),
+            interfaceName: "utun8", localAddresses: localAddresses
+        )
+        #expect(try #require(table.activeFlows().first).initiatedLocally == true)
+    }
+
+    /// Joining a connection already in progress, or watching UDP, leaves only "who spoke
+    /// first" to go on. That is a reasonable inference and is marked as one.
+    @Test("Without a handshake, first mover is presumed the initiator but not certain")
+    func withoutSynFirstMoverIsPresumed() throws {
+        let table = FlowTable()
+        table.record(
+            packet(from: laptop, port: 55555, to: server, port: 53, transport: .udp),
+            interfaceName: "utun8", localAddresses: localAddresses
+        )
+        let flow = try #require(table.activeFlows().first)
+        #expect(flow.initiatedLocally == true)
+        #expect(!flow.initiationIsCertain)
+    }
+
+    /// A late SYN is better evidence than the presumption drawn from a mid-stream packet.
+    @Test("A handshake seen later corrects an earlier presumption")
+    func lateSynCorrectsPresumption() throws {
+        let table = FlowTable()
+        // First observed packet happens to be inbound data on a connection we opened.
+        table.record(
+            packet(from: server, port: 443, to: laptop, port: 51234),
+            interfaceName: "utun8", localAddresses: localAddresses
+        )
+        #expect(try #require(table.activeFlows().first).initiatedLocally == false)
+
+        table.record(
+            packet(from: laptop, port: 51234, to: server, port: 443, flags: .syn),
+            interfaceName: "utun8", localAddresses: localAddresses
+        )
+        let flow = try #require(table.activeFlows().first)
+        #expect(flow.initiatedLocally == true)
+        #expect(flow.initiationIsCertain)
+    }
+
     @Test("Idle flows are retired, active ones are kept")
     func idleFlowsExpire() {
         let table = FlowTable()

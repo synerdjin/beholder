@@ -114,6 +114,19 @@ public struct Flow: Sendable {
     public var hostName: String?
     public var hostNameSource: NameSource?
 
+    /// Whether this machine opened the connection, rather than accepting one.
+    ///
+    /// Nil only before the first packet is recorded. Determining it from port numbers
+    /// would be a guess — plenty of services live on high ports — so it comes from
+    /// observed direction instead.
+    public private(set) var initiatedLocally: Bool?
+
+    /// True when the answer came from watching the opening SYN, which is proof. False
+    /// means it was inferred from whichever direction moved first, which is right for
+    /// UDP and for TCP connections that were already open when capture started, but is
+    /// an inference rather than an observation.
+    public private(set) var initiationIsCertain = false
+
     public init(key: FlowKey, interfaceName: String, at timestamp: Date) {
         self.key = key
         self.interfaceName = interfaceName
@@ -143,6 +156,19 @@ public struct Flow: Sendable {
             bytesIn += UInt64(wireBytes)
             packetsIn += 1
         }
+
+        // Whoever moved first is presumed to have started it.
+        if initiatedLocally == nil {
+            initiatedLocally = direction == .outbound
+        }
+        // A SYN with no ACK *is* the connection opening, so its direction settles the
+        // question and outranks the presumption above. Only the first one counts: a
+        // retransmitted SYN says nothing new, and a SYN-ACK travels the other way.
+        if tcpFlags.isConnectionOpen, !initiationIsCertain {
+            initiatedLocally = direction == .outbound
+            initiationIsCertain = true
+        }
+
         tcpFlagsSeen.formUnion(tcpFlags)
         lastSeen = timestamp
     }

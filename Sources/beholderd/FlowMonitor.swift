@@ -244,6 +244,8 @@ final class FlowMonitor: @unchecked Sendable {
         var namedFlowCount: Int
         var cachedNameCount: Int
         var privateRelayFlowCount: Int
+        var outgoingCount: Int
+        var incomingCount: Int
     }
 
     /// Builds the published form of the current state.
@@ -264,6 +266,8 @@ final class FlowMonitor: @unchecked Sendable {
         statistics.namedFlowCount = current.namedFlowCount
         statistics.cachedNameCount = current.cachedNameCount
         statistics.privateRelayFlowCount = current.privateRelayFlowCount
+        statistics.outgoingCount = current.outgoingCount
+        statistics.incomingCount = current.incomingCount
         statistics.evictedFlowCount = current.evictedFlowCount
         statistics.totalBytesOut = current.totalBytesOut
         statistics.totalBytesIn = current.totalBytesIn
@@ -290,6 +294,8 @@ final class FlowMonitor: @unchecked Sendable {
             var unattributable = 0
             var named = 0
             var privateRelay = 0
+            var outgoing = 0
+            var accepted = 0
             var out: UInt64 = 0
             var incoming: UInt64 = 0
 
@@ -300,6 +306,11 @@ final class FlowMonitor: @unchecked Sendable {
                     unattributed += 1
                 } else {
                     unattributable += 1
+                }
+                switch flow.initiatedLocally {
+                case true: outgoing += 1
+                case false: accepted += 1
+                case nil: break
                 }
                 if flow.hostName != nil { named += 1 }
                 if NameResolutionCache.classify(hostName: flow.hostName) == .privateRelay {
@@ -322,7 +333,9 @@ final class FlowMonitor: @unchecked Sendable {
                 onDemandPasses: onDemandPasses,
                 namedFlowCount: named,
                 cachedNameCount: names.count,
-                privateRelayFlowCount: privateRelay
+                privateRelayFlowCount: privateRelay,
+                outgoingCount: outgoing,
+                incomingCount: accepted
             )
         }
     }
