@@ -84,7 +84,14 @@ public final class NameResolutionCache {
     /// about how long a name remains *useful for display*. A 30-second TTL on a
     /// long-lived connection would otherwise blank out the hostname mid-flow, which is
     /// worse than showing a name that is slightly stale.
-    private static let minimumRetention: TimeInterval = 600
+    ///
+    /// The floor is six hours rather than ten minutes because the cache is now carried
+    /// between runs. At ten minutes an overnight gap expired almost everything: a run the
+    /// next morning reloaded nine names having saved over two hundred, so the warm start
+    /// helped within a session and not at all across days. Six hours is a deliberate
+    /// trade — an address may be reassigned in that window, which is why DNS-derived
+    /// names are always marked as inferred rather than shown as fact.
+    private static let minimumRetention: TimeInterval = 6 * 3600
     private static let maximumRetention: TimeInterval = 86400
 
     /// Bounds memory on a machine doing a lot of DNS.

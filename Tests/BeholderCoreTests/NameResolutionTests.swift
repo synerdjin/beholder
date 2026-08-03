@@ -288,7 +288,8 @@ struct NameResolutionCacheTests {
     }
 
     /// A short TTL governs when a resolver must re-query; it should not blank the name
-    /// out of the display while the connection is still open.
+    /// out of the display while the connection is still open, nor lose it overnight now
+    /// that the cache is carried between runs.
     @Test("Names outlive short DNS time-to-live values")
     func shortTTLIsExtended() throws {
         let cache = NameResolutionCache()
@@ -297,7 +298,12 @@ struct NameResolutionCacheTests {
         cache.record(answer("brief.example.com", [1, 2, 3, 4], ttl: 5), at: now)
 
         #expect(cache.name(for: address, at: now.addingTimeInterval(60)) == "brief.example.com")
-        #expect(cache.name(for: address, at: now.addingTimeInterval(3600)) == nil)
+        // Still there after a few hours, so a run the next morning starts warm.
+        #expect(
+            cache.name(for: address, at: now.addingTimeInterval(4 * 3600)) == "brief.example.com"
+        )
+        // But not indefinitely: an address can be reassigned.
+        #expect(cache.name(for: address, at: now.addingTimeInterval(48 * 3600)) == nil)
     }
 
     @Test("Expired entries are dropped")
@@ -308,8 +314,8 @@ struct NameResolutionCacheTests {
         cache.record(answer("example.com", [1, 2, 3, 4], ttl: 60), at: now)
 
         #expect(cache.expire(at: now.addingTimeInterval(30)) == 0)
-        #expect(cache.expire(at: now.addingTimeInterval(100_000)) == 1)
-        #expect(cache.name(for: address, at: now.addingTimeInterval(100_000)) == nil)
+        #expect(cache.expire(at: now.addingTimeInterval(200_000)) == 1)
+        #expect(cache.name(for: address, at: now.addingTimeInterval(200_000)) == nil)
     }
 
     /// One address commonly serves many aliases; the shorter name is the recognisable one.
