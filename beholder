@@ -24,20 +24,42 @@ APP="${ROOT}/.build/Beholder.app"
 SOCKET="/var/run/beholder.sock"
 
 DAEMON_PID=""
+CLEANED_UP=0
 
 cleanup() {
+    # Trapping both INT and EXIT means this runs twice on Ctrl-C without a guard.
+    [[ "${CLEANED_UP}" -eq 1 ]] && return 0
+    CLEANED_UP=1
     echo
+
     if [[ -n "${DAEMON_PID}" ]] && kill -0 "${DAEMON_PID}" 2>/dev/null; then
         echo "Stopping the capture daemon..."
-        # The daemon runs as root, so stopping it needs sudo too. Credentials are still
-        # cached from the earlier prompt, so this does not ask again.
-        sudo kill -INT "${DAEMON_PID}" 2>/dev/null || true
+        # Ctrl-C has already delivered SIGINT to the whole foreground process group, the
+        # daemon included, so it is almost certainly shutting down of its own accord.
+        # Waiting for that avoids reaching for sudo — which would prompt for the password
+        # a second time, since sudo's credential cache expires after about five minutes
+        # and a capture session usually runs longer than that.
+        for _ in $(seq 1 50); do
+            kill -0 "${DAEMON_PID}" 2>/dev/null || break
+            sleep 0.1
+        done
+
+        if kill -0 "${DAEMON_PID}" 2>/dev/null; then
+            echo "It did not stop on its own, so this needs your password again."
+            sudo kill -INT "${DAEMON_PID}" 2>/dev/null || true
+        fi
         wait "${DAEMON_PID}" 2>/dev/null || true
     fi
+
     osascript -e 'quit app "Beholder"' 2>/dev/null || true
     echo "Stopped."
 }
-trap cleanup EXIT INT TERM
+
+# Ctrl-C is how this is meant to be stopped, so it exits successfully. Without the
+# explicit exit the script would return 130 and make would report a failed target for
+# what is simply the documented way to quit.
+trap cleanup EXIT
+trap 'cleanup; exit 0' INT TERM
 
 echo "Building..."
 swift build --package-path "${ROOT}" --configuration "${CONFIGURATION}" --product beholderd
