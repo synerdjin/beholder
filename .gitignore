@@ -8,3 +8,8 @@ DerivedData/
 # GeoIP databases are large and separately licensed — fetched via Scripts/fetch-geoip.sh
 Resources/geoip/
 *.mmdb
+
+# Run transcripts list every host this machine contacted. They are personal data and
+# must never be committed.
+logs/
+*.log

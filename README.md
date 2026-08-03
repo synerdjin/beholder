@@ -144,6 +144,19 @@ stays at zero means packets are being captured but not drained.
 With no interface arguments it captures whatever carries the default route. Pass names to
 override, or `--loopback` to add `lo0`.
 
+### Run transcripts
+
+Every run writes a transcript to `logs/`, with the newest always at `logs/latest.log`.
+It records the starting conditions, a snapshot every 30 seconds, every interface change,
+and a full final report — the complete flow list, not the excerpt the console shows.
+Snapshots mean a run that is killed rather than stopped cleanly still leaves evidence.
+
+Use `--log DIR` to put it elsewhere, or `--no-log` to turn it off.
+
+The file is created mode 0600 and handed to the user who invoked `sudo`, rather than left
+owned by root. It lists every host this machine contacted, so it is personal data: it is
+readable only by its owner, and `logs/` is in `.gitignore`.
+
 Two subcommands need no root:
 
 ```bash

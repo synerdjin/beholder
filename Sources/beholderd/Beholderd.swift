@@ -51,6 +51,11 @@ enum Beholderd {
         }
         let engine = CaptureEngine(onPacket: packetHandler)
 
+        let log = makeLog(options)
+        if let log {
+            print("Logging to \(log.url.path)")
+        }
+
         var interfaces: [String] = []
         var followedInterface: String?
 
@@ -75,6 +80,20 @@ enum Beholderd {
                 )
             }
             print("")
+
+            // Opening context, so a transcript read later explains its own conditions
+            // rather than needing them remembered.
+            log?.section(
+                "RUN START",
+                """
+                Started:    \(formatTimestamp(Date()))
+                Command:    \(CommandLine.arguments.joined(separator: " "))
+                Interfaces: \(engine.statistics().map { "\($0.interfaceName) (\($0.linkLayer.name))" }.joined(separator: ", "))
+                Following:  \(followedInterface ?? "no — interfaces named explicitly")
+                Host:       \(ProcessInfo.processInfo.hostName)
+                macOS:      \(ProcessInfo.processInfo.operatingSystemVersionString)
+                """
+            )
         } else {
             let path = options.top ? "live view" : "reporting loop"
             print("Self-test: running the \(path) with no interfaces.")
@@ -107,7 +126,9 @@ enum Beholderd {
                 retained.append(created)
             }
 
-            let view = TopView(monitor: monitor, engine: engine, supervisor: supervisor)
+            let view = TopView(
+                monitor: monitor, engine: engine, supervisor: supervisor, log: log
+            )
             view.installSignalHandlers()
             view.start(stopAfterTicks: options.selfTest ? 3 : nil)
             retained.append(monitor)
@@ -146,6 +167,26 @@ enum Beholderd {
             interfaces.append("lo0")
         }
         return (interfaces, followed)
+    }
+
+    /// Opens the run transcript. Defaults to `logs/` beside the working directory so the
+    /// file lands with the project rather than somewhere the user has to go looking.
+    private static func makeLog(_ options: Options) -> RunLog? {
+        guard options.logging else { return nil }
+        let directory =
+            options.logDirectory.map { URL(fileURLWithPath: $0) }
+            ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                .appendingPathComponent("logs")
+
+        guard let log = RunLog(directory: directory, startedAt: Date()) else {
+            // Not fatal. Losing the transcript is a nuisance; refusing to capture
+            // because of it would be worse.
+            FileHandle.standardError.write(
+                Data("beholderd: could not open a log in \(directory.path); continuing.\n".utf8)
+            )
+            return nil
+        }
+        return log
     }
 
     private static func fail(_ message: String) -> Never {

@@ -20,14 +20,28 @@ final class TopView: @unchecked Sendable {
     private var previousBytesIn: UInt64 = 0
     private var previousSampleAt = Date()
     private var ticksRemaining: Int?
+    private var tickCount = 0
     private let startedAt = Date()
 
     private static let clearScreen = "\u{1B}[H\u{1B}[J"
 
-    init(monitor: FlowMonitor, engine: CaptureEngine, supervisor: InterfaceSupervisor?) {
+    private let log: RunLog?
+
+    /// How often the transcript gets a snapshot. Far slower than the one-second display:
+    /// the file is for review after the fact, and a snapshot every second would bury the
+    /// interesting parts.
+    private static let snapshotInterval = 30
+
+    init(
+        monitor: FlowMonitor,
+        engine: CaptureEngine,
+        supervisor: InterfaceSupervisor?,
+        log: RunLog?
+    ) {
         self.monitor = monitor
         self.engine = engine
         self.supervisor = supervisor
+        self.log = log
     }
 
     /// Read live rather than captured at startup, so a route change is reflected in the
@@ -119,11 +133,24 @@ final class TopView: @unchecked Sendable {
 
         print(output)
 
+        tickCount += 1
+        if tickCount % Self.snapshotInterval == 0 {
+            writePeriodicSnapshot()
+        }
+
         if let remaining = ticksRemaining {
             ticksRemaining = remaining - 1
             if remaining - 1 <= 0 {
                 print("")
                 print("Self-test complete: the live view rendered without faulting.")
+                if let log {
+                    log.section(
+                        "FINAL REPORT",
+                        buildReport(endedAt: Date(), flowLimit: .max, unattributedLimit: .max)
+                    )
+                    log.close()
+                    print("Full transcript: \(log.url.path)")
+                }
                 monitor.stop()
                 exit(0)
             }
@@ -183,25 +210,35 @@ final class TopView: @unchecked Sendable {
         return Int(size.ws_row)
     }
 
-    /// Prints a self-contained final report.
+    /// Builds a self-contained report.
     ///
-    /// Deliberately does not clear the screen: the live view is redrawn in place and is
-    /// therefore impossible to copy out of a terminal, so this is what survives and gets
-    /// shared. It repeats the table rather than assuming the last frame is still legible.
-    private func shutDown() {
+    /// One renderer for both the console and the log file, so what gets written to disk
+    /// is exactly what was on screen. It repeats the table rather than assuming the last
+    /// live frame is still legible — the live view redraws in place and cannot be copied
+    /// out of a terminal.
+    ///
+    /// `flowLimit` is the only difference between the two: the console shows a readable
+    /// excerpt, while the log keeps everything, since the whole point of the file is not
+    /// having to reconstruct what was omitted.
+    private func buildReport(
+        endedAt: Date,
+        flowLimit: Int,
+        unattributedLimit: Int
+    ) -> String {
         let summary = monitor.summary()
         let byBytes = summary.flows.sorted { $0.totalBytes > $1.totalBytes }
+        let rule = String(repeating: "─", count: 100)
+        var lines: [String] = []
 
-        let endedAt = Date()
-        print("")
-        print(String(repeating: "─", count: 100))
-        print("Beholder summary — \(interfaces.joined(separator: ", "))")
-        print(
+        lines.append("")
+        lines.append(rule)
+        lines.append("Beholder summary — \(interfaces.joined(separator: ", "))")
+        lines.append(
             "Started \(formatTimestamp(startedAt))  ·  ended \(formatTimestamp(endedAt))"
                 + "  ·  ran \(formatDuration(endedAt.timeIntervalSince(startedAt)))"
         )
-        print(String(repeating: "─", count: 100))
-        print(
+        lines.append(rule)
+        lines.append(
             """
             \(summary.flowCount) flows, \(summary.processCount) processes, \
             \(formatBytes(Double(summary.totalBytesOut))) up, \
@@ -218,7 +255,7 @@ final class TopView: @unchecked Sendable {
         if attributable > 0 {
             let named = attributable - summary.unattributedCount
             let percentage = Double(named) / Double(attributable) * 100
-            print(
+            lines.append(
                 String(
                     format: "Attribution: %d of %d attributable flows named (%.1f%%), %d missed.",
                     named, attributable, percentage, summary.unattributedCount
@@ -226,15 +263,14 @@ final class TopView: @unchecked Sendable {
             )
         }
         if summary.unattributableCount > 0 {
-            print(
+            lines.append(
                 "\(summary.unattributableCount) flows carry no ports (ICMP and similar), "
                     + "so no socket exists to attribute them to — these are system traffic."
             )
         }
-
         if summary.flowCount > 0 {
             let share = Double(summary.namedFlowCount) / Double(summary.flowCount) * 100
-            print(
+            lines.append(
                 String(
                     format: "Hostnames: %d of %d flows named (%.1f%%), %d addresses cached.",
                     summary.namedFlowCount, summary.flowCount, share, summary.cachedNameCount
@@ -242,7 +278,7 @@ final class TopView: @unchecked Sendable {
             )
         }
         if summary.privateRelayFlowCount > 0 {
-            print(
+            lines.append(
                 """
                 \(summary.privateRelayFlowCount) flows go through iCloud Private Relay. \
                 Their real destinations are encrypted end-to-end to Apple and cannot be \
@@ -252,7 +288,7 @@ final class TopView: @unchecked Sendable {
             )
         }
         if summary.evictedFlowCount > 0 {
-            print(
+            lines.append(
                 "\(summary.evictedFlowCount) flows were evicted — the table hit its cap, "
                     + "so these totals are an undercount."
             )
@@ -260,33 +296,33 @@ final class TopView: @unchecked Sendable {
 
         let transitions = supervisor?.recordedTransitions() ?? []
         if !transitions.isEmpty {
-            print("")
-            print("Interface changes during this run:")
+            lines.append("")
+            lines.append("Interface changes during this run:")
             for transition in transitions {
-                print("  \(transition.summary)")
+                lines.append("  \(transition.summary)")
             }
         }
 
         // A proxy fronting other apps makes every per-process number below misleading,
         // so this is stated before the table rather than as a footnote after it.
         for finding in ProxyDetection.findLikelyProxies(in: summary.flows) {
-            print("")
-            print("⚠︎  \(finding.advice)")
+            lines.append("")
+            lines.append("⚠︎  \(finding.advice)")
         }
 
-        print("")
-        print(Self.flowTable(Array(byBytes.prefix(40))))
-        if byBytes.count > 40 {
-            print("… \(byBytes.count - 40) further flows omitted.")
+        lines.append("")
+        lines.append(Self.flowTable(Array(byBytes.prefix(flowLimit))))
+        if byBytes.count > flowLimit {
+            lines.append("… \(byBytes.count - flowLimit) further flows omitted.")
         }
 
         // Unattributed flows are the interesting failure mode, so list them explicitly
         // rather than leaving them buried in the table above.
         let unknown = byBytes.filter { $0.owner == nil }
         if !unknown.isEmpty {
-            print("Unattributed flows (\(unknown.count)):")
-            for flow in unknown.prefix(15) {
-                print(
+            lines.append("Unattributed flows (\(unknown.count)):")
+            for flow in unknown.prefix(unattributedLimit) {
+                lines.append(
                     "  \(Column.left(flow.key.transport.name, 7))"
                         + "\(flow.key.local.endpoint(port: flow.key.localPort)) → "
                         + "\(flow.key.remote.endpoint(port: flow.key.remotePort))  "
@@ -294,12 +330,41 @@ final class TopView: @unchecked Sendable {
                         + formatBytes(Double(flow.totalBytes))
                 )
             }
-            if unknown.count > 15 {
-                print("  … and \(unknown.count - 15) more.")
+            if unknown.count > unattributedLimit {
+                lines.append("  … and \(unknown.count - unattributedLimit) more.")
             }
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    private func shutDown() {
+        let endedAt = Date()
+        print(buildReport(endedAt: endedAt, flowLimit: 40, unattributedLimit: 15))
+
+        if let log {
+            // Everything, with nothing elided — reconstructing an omitted flow after the
+            // fact is impossible, and the file exists precisely to avoid that.
+            log.section(
+                "FINAL REPORT",
+                buildReport(endedAt: endedAt, flowLimit: .max, unattributedLimit: .max)
+            )
+            log.close()
+            print("")
+            print("Full transcript: \(log.url.path)")
         }
 
         monitor.stop()
         exit(0)
+    }
+
+    /// Writes a periodic snapshot, so a run that is killed rather than stopped cleanly
+    /// still leaves usable evidence behind.
+    private func writePeriodicSnapshot() {
+        guard let log else { return }
+        log.section(
+            "SNAPSHOT \(formatTimestamp(Date()))",
+            buildReport(endedAt: Date(), flowLimit: 60, unattributedLimit: 20)
+        )
     }
 }
