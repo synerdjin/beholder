@@ -20,6 +20,9 @@ final class FlowMonitor: @unchecked Sendable {
     // Confined to flowQueue.
     private let table = FlowTable()
     private let names = NameResolutionCache()
+    /// Nil when no geolocation database is installed, which is a normal state — it is
+    /// large, separately licensed, and fetched deliberately.
+    private let geography = GeoIPDatabase.loadFromStandardPaths()
     private var localAddresses: Set<IPAddress>
     private var recentlyDeparted: [ConnectionKey: (entry: SocketEntry, departedAt: Date)] = [:]
     private var previousConnections: [ConnectionKey: SocketEntry] = [:]
@@ -186,6 +189,9 @@ final class FlowMonitor: @unchecked Sendable {
         }
         table.refreshState { key in resolve(key, in: snapshot)?.tcpState }
         table.applyNames { self.names.name(for: $0, at: now) }
+        if let geography {
+            table.applyLocations { geography.location(for: $0) }
+        }
         table.expire(at: now)
         names.expire(at: now)
     }

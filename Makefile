@@ -76,6 +76,18 @@ selftest: daemon-bin ## Exercise timers, rendering and shutdown without capturin
 route: daemon-bin ## Show which interface currently carries the default route
 	@route -n get default 2>/dev/null | grep -E "interface|gateway" || echo "no default route"
 
+# ----------------------------------------------------------------------- geolocation
+
+.PHONY: geoip
+geoip: ## Download the DB-IP City Lite database (~124 MB, CC BY 4.0)
+	./Scripts/fetch-geoip.sh
+
+.PHONY: geoip-status
+geoip-status: ## Report whether a geolocation database is installed
+	@for p in /usr/local/share/beholder/geoip.mmdb Resources/geoip/geoip.mmdb; do \
+		if [ -f "$$p" ]; then echo "installed: $$p ($$(du -h $$p | cut -f1))"; exit 0; fi; \
+	done; echo "not installed - run 'make geoip'"
+
 # ------------------------------------------------------------------------ evidence
 
 .PHONY: log

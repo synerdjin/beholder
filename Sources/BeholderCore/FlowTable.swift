@@ -114,6 +114,16 @@ public final class FlowTable {
         }
     }
 
+    /// Fills in locations for flows that do not have one yet. Cheap to call repeatedly:
+    /// the geolocation cache absorbs the repeats, and a flow is only asked about once.
+    public func applyLocations(_ lookup: (IPAddress) -> GeoLocation?) {
+        for (key, flow) in flows where flow.location == nil {
+            if let location = lookup(flow.key.remote) {
+                flows[key]?.location = location
+            }
+        }
+    }
+
     /// Whether any flow is still waiting to be attributed. Drives the adaptive poll rate:
     /// there is no point walking every process's file descriptors when nothing is
     /// unresolved.

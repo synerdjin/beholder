@@ -126,6 +126,10 @@ public struct Flow: Sendable {
     public var hostName: String?
     public var hostNameSource: NameSource?
 
+    /// Where the far end is, from the local geolocation database. Nil when no database
+    /// is installed, or when the address is not one it can place.
+    public var location: GeoLocation?
+
     /// Whether this machine opened the connection, rather than accepting one.
     ///
     /// Nil only before the first packet is recorded. Determining it from port numbers

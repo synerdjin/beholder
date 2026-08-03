@@ -230,3 +230,27 @@ Beholder sees everything this machine does, so it is deliberately conservative:
   entitlement described above.
 - Byte counts are wire bytes on the captured interface. Capturing the tunnel excludes VPN
   encapsulation overhead, so totals will differ slightly from what `en0` sees.
+
+## Geolocation
+
+Connections are placed on a map using a local database, installed separately:
+
+```bash
+make geoip
+```
+
+That fetches DB-IP City Lite (~124 MB). DB-IP publishes it free and monthly with no
+account, under CC BY 4.0 — MaxMind's better-known GeoLite2 now requires signing up for a
+licence key, which is a poor fit for something you should be able to build and run
+without registering anywhere.
+
+Lookups are entirely offline. A tool for watching what your machine talks to has no
+business querying a geolocation API, because the query would leak exactly the information
+it exists to show you.
+
+The `.mmdb` reader is written here rather than pulled in as a dependency: the format is
+well specified, the code is testable, and the file is memory-mapped so a 124 MB database
+costs a daemon almost no resident memory.
+
+> This product includes GeoLite data created by DB-IP, available from
+> <https://db-ip.com/>, licensed under CC BY 4.0.

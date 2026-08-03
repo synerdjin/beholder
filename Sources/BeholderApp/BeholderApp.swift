@@ -138,16 +138,39 @@ private struct MenuBarContent: View {
 
 // MARK: - Main window
 
+private enum Presentation: String, CaseIterable, Identifiable {
+    case connections = "Connections"
+    case map = "Map"
+    var id: String { rawValue }
+
+    var symbol: String {
+        switch self {
+        case .connections: return "list.bullet"
+        case .map: return "globe"
+        }
+    }
+}
+
 private struct MainView: View {
     let client: FlowClient
+    @State private var presentation: Presentation = .connections
 
     var body: some View {
         VStack(spacing: 0) {
             if let snapshot = client.snapshot {
-                HeaderView(snapshot: snapshot, history: client.history)
+                HeaderView(
+                    snapshot: snapshot,
+                    history: client.history,
+                    presentation: $presentation
+                )
                 Divider()
                 WarningsView(statistics: snapshot.statistics)
-                ConnectionsView(snapshot: snapshot)
+                switch presentation {
+                case .connections:
+                    ConnectionsView(snapshot: snapshot)
+                case .map:
+                    ConnectionMapView(snapshot: snapshot)
+                }
             } else {
                 WaitingView(state: client.state)
             }
@@ -259,6 +282,7 @@ func directionSummary(_ statistics: WireStatistics) -> String {
 private struct HeaderView: View {
     let snapshot: FlowSnapshot
     let history: [FlowClient.ThroughputSample]
+    @Binding var presentation: Presentation
 
     var body: some View {
         HStack(alignment: .top, spacing: 20) {
@@ -290,9 +314,18 @@ private struct HeaderView: View {
 
             Spacer()
 
+            Picker("View", selection: $presentation) {
+                ForEach(Presentation.allCases) { option in
+                    Label(option.rawValue, systemImage: option.symbol).tag(option)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+
             if !history.isEmpty {
                 ThroughputChart(history: history)
-                    .frame(width: 320, height: 74)
+                    .frame(width: 260, height: 74)
             }
         }
         .padding(12)

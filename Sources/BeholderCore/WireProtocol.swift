@@ -51,6 +51,7 @@ public struct WireFlow: Codable, Sendable, Identifiable, Hashable {
 
     /// True when this machine opened the connection. Nil when nothing has been observed
     /// yet, which in practice never reaches a client.
+    public let location: GeoLocation?
     public let isOutgoing: Bool?
     /// True when `isOutgoing` came from watching the opening handshake rather than being
     /// inferred from which direction moved first.
@@ -71,8 +72,9 @@ public struct WireFlow: Codable, Sendable, Identifiable, Hashable {
         hostName: String?, hostNameIsProof: Bool, isPrivateRelay: Bool,
         bytesOut: UInt64, bytesIn: UInt64, packetsOut: UInt64, packetsIn: UInt64,
         tcpState: String?, firstSeen: Date, lastSeen: Date,
-        isOutgoing: Bool?, initiationIsCertain: Bool
+        location: GeoLocation?, isOutgoing: Bool?, initiationIsCertain: Bool
     ) {
+        self.location = location
         self.isOutgoing = isOutgoing
         self.initiationIsCertain = initiationIsCertain
         self.id = id
@@ -196,6 +198,7 @@ extension Flow {
             tcpState: tcpState.map(String.init(describing:)),
             firstSeen: firstSeen,
             lastSeen: lastSeen,
+            location: location,
             isOutgoing: {
                 switch direction {
                 case .outgoing: return true
