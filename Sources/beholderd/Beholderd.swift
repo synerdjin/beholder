@@ -35,6 +35,12 @@ enum Beholderd {
             exit(1)
         }
 
+        // Reading history needs no capture and no root, so it is handled before
+        // anything privileged is attempted.
+        if options.history {
+            HistoryCommands.run(options)
+        }
+
         if options.dumpSockets {
             SocketDump.run()
             exit(0)
@@ -104,6 +110,16 @@ enum Beholderd {
         retained.append(engine)
 
         if let monitor {
+            if options.storeHistory, !options.selfTest {
+                switch monitor.openStore(at: options.historyPath ?? FlowStore.defaultPath()) {
+                case .success(let path):
+                    print("Recording history to \(path)")
+                case .failure(let error):
+                    FileHandle.standardError.write(
+                        Data("beholderd: \(error); continuing without history.\n".utf8)
+                    )
+                }
+            }
             monitor.start()
 
             // Only supervise when Beholder chose the interface. An explicit interface

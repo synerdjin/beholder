@@ -289,3 +289,50 @@ Nothing here is a verdict. `api.anthropic.com` is an application doing its job a
 `browser-intake-us5-datadoghq.com` is telemetry, yet both are an app talking to its vendor
 over TLS — only the person using the machine can judge which they mind. Being
 **unrecognised** is likewise the ordinary condition of most of the internet, not a finding.
+
+## History
+
+Finished connections are written to a SQLite database as they retire, so the picture
+survives the daemon stopping.
+
+```bash
+make history           # the last day
+make history-week      # the last week
+make history-csv       # export
+```
+
+Querying needs no root and no running capture. `--match` filters on app, host, address,
+company or network — the same fields the live view searches, so a query learned in one
+place works in the other.
+
+Two tables: `flows` keeps one row per completed conversation for 30 days, and `rollups`
+keeps per-minute totals per process for a year. A chart spanning weeks reads the rollups;
+scanning millions of flow rows to draw it would not do.
+
+The database lives beside the name cache under your own Application Support directory,
+mode 0600, owned by you rather than root — it records every host this machine contacted.
+
+Every report states the window it actually covers, because an empty result is otherwise
+ambiguous between "nothing happened" and "nothing was watching".
+
+## Capturing continuously
+
+```bash
+make install     # asks for your password
+make status
+make uninstall
+```
+
+This is what makes history worth having. A database that only fills while you are watching
+answers the same questions the live view already does; one that filled while you were not
+is what answers "what did this app do on Tuesday".
+
+It is a genuine change to your system, so it is a separate opt-in rather than something
+`make run` does quietly. It installs exactly two things — `/usr/local/libexec/beholderd`
+and `/Library/LaunchDaemons/com.beholder.daemon.plist` — plus any optional databases, and
+`make uninstall` removes all of it. **Your captured history is never deleted by the
+uninstaller**; deleting a record of everywhere your machine has been is not a decision an
+uninstall script should make for you.
+
+With a Developer ID this would be `SMAppService` instead, letting the app install and
+remove the daemon itself with a proper entry in System Settings.

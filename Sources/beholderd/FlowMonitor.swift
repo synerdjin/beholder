@@ -29,6 +29,11 @@ final class FlowMonitor: @unchecked Sendable {
     /// Nil when no tracker index is installed. Fetched deliberately, like geolocation,
     /// because its data carries a NonCommercial licence.
     private let trackers = TrackerDatabase.loadFromStandardPaths()
+    /// Nil when history is disabled or the database could not be opened. Losing history
+    /// is a nuisance; refusing to capture over it would be worse.
+    private var store: FlowStore?
+    private var lastPrunedAt = Date.distantPast
+    private(set) var flowsPersisted: UInt64 = 0
 
     /// Where learned names are kept between runs. Under the user's own directory rather
     /// than a system path, since it records everywhere the machine has been.
@@ -139,6 +144,18 @@ final class FlowMonitor: @unchecked Sendable {
     /// Names learned in earlier runs, and how many were reloaded.
     private(set) var restoredNameCount = 0
 
+    /// Opens the history database. Called before `start()`; a failure is reported and
+    /// capture continues without history.
+    func openStore(at path: String) -> Result<String, Error> {
+        do {
+            let opened = try FlowStore(path: path)
+            flowQueue.sync { self.store = opened }
+            return .success(opened.path)
+        } catch {
+            return .failure(error)
+        }
+    }
+
     func start() {
         // A warm start matters: macOS caches DNS for hours, so a fresh capture sees very
         // few lookups and would otherwise relearn everything from scratch.
@@ -189,6 +206,13 @@ final class FlowMonitor: @unchecked Sendable {
         addressTimer?.cancel()
         addressTimer = nil
         saveNameCache()
+        // Anything still live at shutdown never retired, so it would otherwise be lost.
+        flowQueue.sync {
+            guard let store else { return }
+            let remaining = table.activeFlows() + table.drainRetired()
+            _ = try? store.record(remaining)
+            store.close()
+        }
     }
 
     /// Hands the learned names to the next run.
@@ -277,8 +301,42 @@ final class FlowMonitor: @unchecked Sendable {
         }
 
         table.expire(at: now)
+        persistRetiredFlows(at: now)
         names.expire(at: now)
     }
+
+    /// Runs on flowQueue. Hands retired flows to the database.
+    ///
+    /// Retirement is the right moment: a flow is only complete once it has stopped, and
+    /// writing it earlier would mean rewriting it as its counters grew.
+    private func persistRetiredFlows(at now: Date) {
+        guard let store else { return }
+        let retired = table.drainRetired()
+        if !retired.isEmpty {
+            do {
+                try store.record(retired)
+                flowsPersisted += UInt64(retired.count)
+            } catch {
+                // Reported once per run rather than per batch; a failing database should
+                // not drown the terminal or stop capture.
+                if storeErrorReported == false {
+                    storeErrorReported = true
+                    FileHandle.standardError.write(
+                        Data("beholderd: cannot write history: \(error)\n".utf8)
+                    )
+                }
+            }
+        }
+
+        // Hourly is often enough for a retention policy measured in days, and keeps a
+        // delete off the hot path.
+        if now.timeIntervalSince(lastPrunedAt) > 3600 {
+            lastPrunedAt = now
+            _ = try? store.prune(now: now)
+        }
+    }
+
+    private var storeErrorReported = false
 
     /// Runs on flowQueue.
     private func resolve(

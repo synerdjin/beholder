@@ -103,6 +103,40 @@ trackers-status: ## Report whether the tracker index is installed
 .PHONY: data
 data: geoip trackers ## Download both optional databases
 
+# ------------------------------------------------------------------------- history
+
+.PHONY: history
+history: daemon-bin ## Show what was captured in the last day (no root needed)
+	@$(DAEMON) --history
+
+.PHONY: history-week
+history-week: daemon-bin ## Show the last week
+	@$(DAEMON) --history --hours 168
+
+.PHONY: history-csv
+history-csv: daemon-bin ## Export the last day as CSV
+	@$(DAEMON) --history --csv
+
+# ------------------------------------------------------- continuous capture (root)
+
+.PHONY: install
+install: ## (root) Install as a launchd daemon so it captures continuously and at boot
+	sudo ./Scripts/install-daemon.sh
+
+.PHONY: uninstall
+uninstall: ## (root) Remove the daemon. Your captured history is left alone
+	sudo ./Scripts/uninstall-daemon.sh
+
+.PHONY: status
+status: ## Report whether the installed daemon is running
+	@if launchctl print system/com.beholder.daemon >/dev/null 2>&1; then \
+		echo "running (installed as a launchd daemon)"; \
+	elif [ -S /var/run/beholder.sock ]; then \
+		echo "running in the foreground"; \
+	else \
+		echo "not running"; \
+	fi
+
 # ------------------------------------------------------------------------ evidence
 
 .PHONY: log

@@ -30,6 +30,9 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
+// Historical storage
+#include <sqlite3.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif

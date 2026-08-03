@@ -11,6 +11,12 @@ struct Options {
     var logging = true
     var serve = false
     var socketPath = WireProtocol.defaultSocketPath
+    var history = false
+    var historyHours = 24
+    var historyMatch: String?
+    var historyCSV = false
+    var historyPath: String?
+    var storeHistory = true
 
     static let usage = """
         usage: beholderd [--top] [--loopback] [--log DIR | --no-log]
@@ -36,6 +42,17 @@ struct Options {
                         --top to also watch it in the terminal. The socket is owned by
                         the user who ran sudo and created mode 0600.
           --socket PATH Publish somewhere other than \(WireProtocol.defaultSocketPath).
+          --no-history  Do not record finished connections to the history database.
+
+        Querying history (needs no root if the database is yours):
+
+          --history         Show what was recorded. Needs no capture running.
+          --hours N         How far back to look (default 24).
+          --match TEXT      Only connections matching an app, host, address, company
+                            or network.
+          --csv             Emit CSV instead of a summary.
+          --history-db PATH Read a database somewhere other than the default.
+
           --help        Show this message.
 
         Capture requires root: it reads /dev/bpf*, which is mode 0600 root:wheel.
@@ -45,6 +62,9 @@ struct Options {
         var options = Options()
         var expectingLogDirectory = false
         var expectingSocketPath = false
+        var expectingHours = false
+        var expectingMatch = false
+        var expectingHistoryPath = false
 
         for argument in arguments {
             if expectingLogDirectory {
@@ -57,13 +77,46 @@ struct Options {
                 expectingSocketPath = false
                 continue
             }
+            if expectingHours {
+                guard let hours = Int(argument), hours > 0 else {
+                    FileHandle.standardError.write(
+                        Data("beholderd: --hours needs a positive number\n".utf8)
+                    )
+                    return nil
+                }
+                options.historyHours = hours
+                expectingHours = false
+                continue
+            }
+            if expectingMatch {
+                options.historyMatch = argument
+                expectingMatch = false
+                continue
+            }
+            if expectingHistoryPath {
+                options.historyPath = argument
+                expectingHistoryPath = false
+                continue
+            }
             switch argument {
             case "--log":
                 expectingLogDirectory = true
             case "--socket":
                 expectingSocketPath = true
+            case "--hours":
+                expectingHours = true
+            case "--match":
+                expectingMatch = true
+            case "--history-db":
+                expectingHistoryPath = true
             case "--serve":
                 options.serve = true
+            case "--history":
+                options.history = true
+            case "--csv":
+                options.historyCSV = true
+            case "--no-history":
+                options.storeHistory = false
             case "--no-log":
                 options.logging = false
             case "--loopback", "-l":
@@ -93,6 +146,18 @@ struct Options {
         }
         guard !expectingSocketPath else {
             FileHandle.standardError.write(Data("beholderd: --socket needs a path\n".utf8))
+            return nil
+        }
+        guard !expectingHours else {
+            FileHandle.standardError.write(Data("beholderd: --hours needs a number\n".utf8))
+            return nil
+        }
+        guard !expectingMatch else {
+            FileHandle.standardError.write(Data("beholderd: --match needs a search term\n".utf8))
+            return nil
+        }
+        guard !expectingHistoryPath else {
+            FileHandle.standardError.write(Data("beholderd: --history-db needs a path\n".utf8))
             return nil
         }
         return options
