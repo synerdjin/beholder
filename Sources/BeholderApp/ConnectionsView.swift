@@ -63,9 +63,14 @@ struct ConnectionsView: View {
         if !searchText.isEmpty {
             let needle = searchText.lowercased()
             matching = matching.filter { flow in
+                // The network operator is included because it is the only identification
+                // many addresses have — searching "PacketHub" should find the VPN's
+                // resolvers even though none of them has a hostname.
                 let haystack = [
                     flow.processName, flow.hostName, flow.remoteAddress,
                     String(flow.remotePort), flow.classification?.owner,
+                    flow.networkOperator?.organization,
+                    flow.location?.countryCode, flow.location?.city,
                 ]
                 .compactMap { $0 }.joined(separator: " ").lowercased()
                 return haystack.contains(needle)
@@ -141,7 +146,7 @@ struct ConnectionsView: View {
                 }
             }
         }
-        .searchable(text: $searchText, prompt: "Filter by process, host or port")
+        .searchable(text: $searchText, prompt: "Filter by app, host, port, company, network or place")
     }
 }
 
