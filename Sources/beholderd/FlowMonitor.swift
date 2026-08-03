@@ -35,14 +35,10 @@ final class FlowMonitor: @unchecked Sendable {
     private var lastPrunedAt = Date.distantPast
     private(set) var flowsPersisted: UInt64 = 0
 
-    /// Where learned names are kept between runs. Under the user's own directory rather
-    /// than a system path, since it records everywhere the machine has been.
+    /// Where learned names are kept between runs, resolved centrally alongside the
+    /// history database so the two cannot drift apart.
     static var nameCacheURL: URL {
-        let base = ProcessInfo.processInfo.environment["SUDO_USER"].map {
-            URL(fileURLWithPath: "/Users/\($0)/Library/Application Support/Beholder")
-        } ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-            .appendingPathComponent(".beholder")
-        return base.appendingPathComponent("names.json")
+        URL(fileURLWithPath: BeholderPaths.nameCache())
     }
     private var localAddresses: Set<IPAddress>
     private var recentlyDeparted: [ConnectionKey: (entry: SocketEntry, departedAt: Date)] = [:]

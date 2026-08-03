@@ -48,14 +48,10 @@ public final class FlowStore {
     public private(set) var flowsWritten: UInt64 = 0
     public private(set) var flowsPruned: UInt64 = 0
 
-    /// Where the database lives by default: alongside the name cache, under the invoking
-    /// user's Application Support rather than a system path, because it records every
-    /// host this machine has contacted.
+    /// Where the database lives by default. Resolved centrally so the daemon and the
+    /// query commands cannot disagree about it — see BeholderPaths.
     public static func defaultPath() -> String {
-        let base = ProcessInfo.processInfo.environment["SUDO_USER"].map {
-            "/Users/\($0)/Library/Application Support/Beholder"
-        } ?? FileManager.default.currentDirectoryPath + "/.beholder"
-        return base + "/history.sqlite"
+        BeholderPaths.historyDatabase()
     }
 
     public init(path: String) throws {
