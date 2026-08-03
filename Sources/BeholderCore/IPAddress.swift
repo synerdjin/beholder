@@ -94,6 +94,25 @@ public struct IPAddress: Hashable, Sendable, CustomStringConvertible {
         return rendered == nil ? "<invalid>" : String(nullTerminated: text)
     }
 
+    /// Parses a textual address. Accepts both families; returns nil for anything else.
+    public init?(text: String) {
+        var v4 = in_addr()
+        if inet_pton(AF_INET, text, &v4) == 1 {
+            self.init(v4NetworkOrder: v4.s_addr)
+            return
+        }
+        var v6 = in6_addr()
+        if inet_pton(AF_INET6, text, &v6) == 1 {
+            let bytes = withUnsafeBytes(of: &v6) { Array($0) }
+            guard let parsed = IPAddress(networkOrderBytes: bytes, family: .v6) else {
+                return nil
+            }
+            self = parsed
+            return
+        }
+        return nil
+    }
+
     /// Renders an address with its port.
     ///
     /// IPv6 addresses must be bracketed, because they contain colons themselves:

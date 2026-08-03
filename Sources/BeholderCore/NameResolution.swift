@@ -8,16 +8,29 @@ public enum NameObservation: Sendable, Equatable {
     case serverName(String)
 }
 
-/// How a hostname was established, best evidence first.
-public enum NameSource: Sendable, Equatable, Comparable {
+/// How a hostname was established, weakest evidence first.
+public enum NameSource: String, Sendable, Equatable, Comparable, CaseIterable {
+    /// A PTR record for the address. The weakest source: PTR names describe
+    /// infrastructure rather than service, so a Google address resolves to something
+    /// like `lga25s71-in-f14.1e100.net` rather than to anything a person asked for.
+    /// Still worth having — it names the operator, which is often the useful part.
+    case reverseLookup
     /// Inferred from a DNS answer seen earlier. An address can host many names, so this
     /// is a good guess rather than proof.
     case dns
     /// Read from this connection's own ClientHello. Proof, for this flow specifically.
     case serverNameIndication
 
+    private var rank: Int {
+        switch self {
+        case .reverseLookup: return 0
+        case .dns: return 1
+        case .serverNameIndication: return 2
+        }
+    }
+
     public static func < (lhs: NameSource, rhs: NameSource) -> Bool {
-        lhs == .dns && rhs == .serverNameIndication
+        lhs.rank < rhs.rank
     }
 }
 
@@ -33,12 +46,39 @@ public enum EndpointKind: Sendable, Equatable {
 ///
 /// Not thread-safe; confine to one queue, as with `FlowTable`.
 public final class NameResolutionCache {
-    private struct Entry {
+    struct Entry {
         var name: String
         var expiresAt: Date
+        var source: NameSource
     }
 
     private var entries: [IPAddress: Entry] = [:]
+
+    /// Exposed for persistence, which lives in an extension.
+    var entriesForPersistence: [IPAddress: Entry] { entries }
+
+    /// Stores a name directly. Used when reloading from disk and by reverse lookups;
+    /// observed DNS goes through `record(_:at:)`.
+    public func adopt(
+        name: String, for address: IPAddress, expiresAt: Date, source: NameSource
+    ) {
+        // Better evidence wins; equal evidence prefers the shorter, more recognisable name.
+        if let existing = entries[address], existing.expiresAt > Date() {
+            if existing.source > source { return }
+            if existing.source == source, existing.name.count <= name.count { return }
+        }
+        entries[address] = Entry(name: name, expiresAt: expiresAt, source: source)
+    }
+
+    /// Whether this address already has a name, so a reverse lookup can be skipped.
+    public func hasName(for address: IPAddress, at now: Date = Date()) -> Bool {
+        guard let entry = entries[address] else { return false }
+        return entry.expiresAt > now
+    }
+
+    public func source(for address: IPAddress) -> NameSource? {
+        entries[address]?.source
+    }
 
     /// DNS time-to-live governs when a resolver must ask again — it is not a statement
     /// about how long a name remains *useful for display*. A 30-second TTL on a
@@ -66,12 +106,13 @@ public final class NameResolutionCache {
             // one address, and the shorter name is almost always the recognisable one.
             if let existing = entries[address],
                 existing.expiresAt > now,
+                existing.source == .dns,
                 existing.name.count <= answer.name.count
             {
                 entries[address]?.expiresAt = expiry
                 continue
             }
-            entries[address] = Entry(name: answer.name, expiresAt: expiry)
+            adopt(name: answer.name, for: address, expiresAt: expiry, source: .dns)
         }
 
         if entries.count > Self.maximumEntries {

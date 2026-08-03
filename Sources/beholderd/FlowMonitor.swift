@@ -23,6 +23,17 @@ final class FlowMonitor: @unchecked Sendable {
     /// Nil when no geolocation database is installed, which is a normal state — it is
     /// large, separately licensed, and fetched deliberately.
     private let geography = GeoIPDatabase.loadFromStandardPaths()
+    private var reverseResolver: ReverseResolver?
+
+    /// Where learned names are kept between runs. Under the user's own directory rather
+    /// than a system path, since it records everywhere the machine has been.
+    static var nameCacheURL: URL {
+        let base = ProcessInfo.processInfo.environment["SUDO_USER"].map {
+            URL(fileURLWithPath: "/Users/\($0)/Library/Application Support/Beholder")
+        } ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".beholder")
+        return base.appendingPathComponent("names.json")
+    }
     private var localAddresses: Set<IPAddress>
     private var recentlyDeparted: [ConnectionKey: (entry: SocketEntry, departedAt: Date)] = [:]
     private var previousConnections: [ConnectionKey: SocketEntry] = [:]
@@ -112,7 +123,31 @@ final class FlowMonitor: @unchecked Sendable {
         }
     }
 
+    /// Names learned in earlier runs, and how many were reloaded.
+    private(set) var restoredNameCount = 0
+
     func start() {
+        // A warm start matters: macOS caches DNS for hours, so a fresh capture sees very
+        // few lookups and would otherwise relearn everything from scratch.
+        let restored = names.load(from: Self.nameCacheURL)
+        flowQueue.async { self.restoredNameCount = restored }
+
+        let resolver = ReverseResolver { [weak self] address, name in
+            guard let self else { return }
+            self.flowQueue.async {
+                // PTR records are long-lived and rarely change; a day is generous without
+                // being permanent.
+                self.names.adopt(
+                    name: name,
+                    for: address,
+                    expiresAt: Date().addingTimeInterval(86400),
+                    source: .reverseLookup
+                )
+                self.table.applyNames { self.names.name(for: $0) }
+            }
+        }
+        reverseResolver = resolver
+
         let attribution = DispatchSource.makeTimerSource(queue: attributionQueue)
         attribution.schedule(
             deadline: .now() + 0.2,
@@ -139,6 +174,27 @@ final class FlowMonitor: @unchecked Sendable {
         attributionTimer = nil
         addressTimer?.cancel()
         addressTimer = nil
+        saveNameCache()
+    }
+
+    /// Hands the learned names to the next run.
+    @discardableResult
+    func saveNameCache() -> Int {
+        flowQueue.sync {
+            let entries = names.persistableEntries()
+            _ = names.save(to: Self.nameCacheURL)
+            // The daemon runs as root, so the file would otherwise be unreadable to the
+            // user it is about — the same problem the transcript has.
+            let environment = ProcessInfo.processInfo.environment
+            if let uidText = environment["SUDO_UID"], let uid = uid_t(uidText),
+                let gidText = environment["SUDO_GID"], let gid = gid_t(gidText)
+            {
+                let path = Self.nameCacheURL.path
+                chown(path, uid, gid)
+                chown(Self.nameCacheURL.deletingLastPathComponent().path, uid, gid)
+            }
+            return entries.count
+        }
     }
 
     /// Re-reads the machine's interface addresses at once.
@@ -192,6 +248,16 @@ final class FlowMonitor: @unchecked Sendable {
         if let geography {
             table.applyLocations { geography.location(for: $0) }
         }
+
+        // Ask about anything still nameless. Cheapest source first means this only ever
+        // sees what SNI and observed DNS could not account for.
+        if let reverseResolver {
+            for flow in table.activeFlows()
+            where flow.hostName == nil && flow.key.remote.isGloballyRoutable {
+                reverseResolver.request(flow.key.remote)
+            }
+        }
+
         table.expire(at: now)
         names.expire(at: now)
     }
@@ -253,6 +319,13 @@ final class FlowMonitor: @unchecked Sendable {
         var outgoingCount: Int
         var incomingCount: Int
         var undeterminedDirectionCount: Int
+        /// Named flows split by evidence, so a coverage figure can be read for what it is.
+        var namedBySNI: Int
+        var namedByDNS: Int
+        var namedByReverseLookup: Int
+        var restoredNameCount: Int
+        var reverseLookupsAttempted: Int
+        var reverseLookupsSucceeded: Int
     }
 
     /// Builds the published form of the current state.
@@ -295,12 +368,19 @@ final class FlowMonitor: @unchecked Sendable {
     }
 
     func summary() -> Summary {
-        flowQueue.sync {
+        // Read outside the flow queue: the resolver has its own.
+        // Labels on the fallback, or the tuple loses them and `.attempted` stops existing.
+        let reverseStatistics =
+            reverseResolver?.statistics ?? (attempted: 0, succeeded: 0, failed: 0)
+        return flowQueue.sync {
             let flows = table.activeFlows()
             var owners = Set<ProcessOwner>()
             var unattributed = 0
             var unattributable = 0
             var named = 0
+            var bySNI = 0
+            var byDNS = 0
+            var byReverse = 0
             var privateRelay = 0
             var outgoing = 0
             var accepted = 0
@@ -321,7 +401,15 @@ final class FlowMonitor: @unchecked Sendable {
                 case .incoming: accepted += 1
                 case .undetermined: undetermined += 1
                 }
-                if flow.hostName != nil { named += 1 }
+                if flow.hostName != nil {
+                    named += 1
+                    switch flow.hostNameSource {
+                    case .serverNameIndication: bySNI += 1
+                    case .dns: byDNS += 1
+                    case .reverseLookup: byReverse += 1
+                    case nil: break
+                    }
+                }
                 if NameResolutionCache.classify(hostName: flow.hostName) == .privateRelay {
                     privateRelay += 1
                 }
@@ -345,7 +433,13 @@ final class FlowMonitor: @unchecked Sendable {
                 privateRelayFlowCount: privateRelay,
                 outgoingCount: outgoing,
                 incomingCount: accepted,
-                undeterminedDirectionCount: undetermined
+                undeterminedDirectionCount: undetermined,
+                namedBySNI: bySNI,
+                namedByDNS: byDNS,
+                namedByReverseLookup: byReverse,
+                restoredNameCount: restoredNameCount,
+                reverseLookupsAttempted: reverseStatistics.attempted,
+                reverseLookupsSucceeded: reverseStatistics.succeeded
             )
         }
     }

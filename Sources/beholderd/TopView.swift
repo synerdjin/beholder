@@ -300,6 +300,16 @@ final class TopView: @unchecked Sendable {
                     summary.namedFlowCount, summary.flowCount, share, summary.cachedNameCount
                 )
             )
+            lines.append(
+                "  by source: \(summary.namedBySNI) from TLS SNI, "
+                    + "\(summary.namedByDNS) from observed DNS, "
+                    + "\(summary.namedByReverseLookup) from reverse lookup."
+            )
+            lines.append(
+                "  \(summary.restoredNameCount) names carried over from earlier runs; "
+                    + "\(summary.reverseLookupsSucceeded) of "
+                    + "\(summary.reverseLookupsAttempted) reverse lookups answered."
+            )
         }
         if summary.privateRelayFlowCount > 0 {
             lines.append(
