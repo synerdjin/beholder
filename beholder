@@ -1,0 +1,74 @@
+#!/bin/bash
+#
+# Starts Beholder: the capture daemon and the viewer, from one command.
+#
+# Why this is a script rather than a single binary that does both:
+#
+# Capture reads /dev/bpf*, which is root-only. A GUI must NOT run as root — it would
+# own windows as root, write root-owned preferences into your home directory, and give
+# a large SwiftUI process privileges it has no use for. So the two halves genuinely
+# have to be separate processes at different privilege levels; the only question is who
+# arranges them, and doing it here keeps it visible.
+#
+# The alternative — having the app escalate on its own — needs either a signed helper
+# (SMAppService, which requires a Developer ID) or an osascript admin prompt, which
+# hides a root launch behind a dialog. A sudo prompt in your own terminal is honest
+# about what is being asked for.
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIGURATION="${BEHOLDER_CONFIG:-debug}"
+DAEMON="${ROOT}/.build/${CONFIGURATION}/beholderd"
+APP="${ROOT}/.build/Beholder.app"
+SOCKET="/var/run/beholder.sock"
+
+DAEMON_PID=""
+
+cleanup() {
+    echo
+    if [[ -n "${DAEMON_PID}" ]] && kill -0 "${DAEMON_PID}" 2>/dev/null; then
+        echo "Stopping the capture daemon..."
+        # The daemon runs as root, so stopping it needs sudo too. Credentials are still
+        # cached from the earlier prompt, so this does not ask again.
+        sudo kill -INT "${DAEMON_PID}" 2>/dev/null || true
+        wait "${DAEMON_PID}" 2>/dev/null || true
+    fi
+    osascript -e 'quit app "Beholder"' 2>/dev/null || true
+    echo "Stopped."
+}
+trap cleanup EXIT INT TERM
+
+echo "Building..."
+swift build --package-path "${ROOT}" --configuration "${CONFIGURATION}" --product beholderd
+"${ROOT}/Scripts/build-app.sh" "${CONFIGURATION}" > /dev/null
+
+# Ask for the password once, up front, so the prompt is not buried in later output.
+echo
+echo "Capture needs root because it reads /dev/bpf*."
+sudo -v
+
+sudo "${DAEMON}" --serve --loopback --socket "${SOCKET}" "$@" &
+DAEMON_PID=$!
+
+# Wait for the socket rather than sleeping a fixed interval, so a slow start is not a
+# race and a failed start is reported instead of silently opening an empty app.
+for _ in $(seq 1 50); do
+    [[ -S "${SOCKET}" ]] && break
+    if ! kill -0 "${DAEMON_PID}" 2>/dev/null; then
+        echo "The capture daemon exited during startup. See the output above." >&2
+        exit 1
+    fi
+    sleep 0.1
+done
+
+if [[ ! -S "${SOCKET}" ]]; then
+    echo "The daemon did not create ${SOCKET} in time." >&2
+    exit 1
+fi
+
+open "${APP}"
+
+echo
+echo "Beholder is running. Press Ctrl-C to stop the daemon and quit the app."
+wait "${DAEMON_PID}"

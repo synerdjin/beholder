@@ -126,9 +126,25 @@ put, not a hint.
 - [x] Caveats surfaced in the UI rather than buried
 
 ```bash
+./beholder
+```
+
+That builds both halves, asks for your password once, starts the daemon and opens the
+app. Ctrl-C stops the daemon and quits the app.
+
+It stays two processes on purpose. Capture reads `/dev/bpf*` and needs root; a GUI must
+not run as root, or it owns windows as root and writes root-owned preferences into your
+home directory. The only question is who arranges the two, and a `sudo` prompt in your
+own terminal is more honest than an app escalating behind a dialog. Running them by hand
+also works:
+
+```bash
 sudo ./.build/debug/beholderd --serve --loopback   # capture, needs root
 ./Scripts/build-app.sh && open .build/Beholder.app # viewer, does not
 ```
+
+`--serve` draws nothing so it can sit in the background; add `--top` to watch it in the
+terminal at the same time.
 
 The plan called for XPC. XPC to a root daemon means registering it under
 `/Library/LaunchDaemons` — a persistent system change, and realistically one wanting a

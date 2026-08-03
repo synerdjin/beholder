@@ -32,16 +32,23 @@ final class TopView: @unchecked Sendable {
     /// interesting parts.
     private static let snapshotInterval = 30
 
+    /// When false, the session runs without drawing anything: snapshots, transcript and
+    /// clean shutdown all still happen. That is what `--serve` needs, since a full-screen
+    /// redraw would fight with whatever is sharing the terminal.
+    private let rendersToTerminal: Bool
+
     init(
         monitor: FlowMonitor,
         engine: CaptureEngine,
         supervisor: InterfaceSupervisor?,
-        log: RunLog?
+        log: RunLog?,
+        rendersToTerminal: Bool = true
     ) {
         self.monitor = monitor
         self.engine = engine
         self.supervisor = supervisor
         self.log = log
+        self.rendersToTerminal = rendersToTerminal
     }
 
     /// Read live rather than captured at startup, so a route change is reflected in the
@@ -89,6 +96,14 @@ final class TopView: @unchecked Sendable {
         previousBytesOut = summary.totalBytesOut
         previousBytesIn = summary.totalBytesIn
 
+        // Serving the app needs the session running but nothing drawn: a full-screen
+        // redraw would fight with whatever else is using the terminal. Snapshots,
+        // transcript and shutdown all still happen below.
+        guard rendersToTerminal else {
+            advanceTick()
+            return
+        }
+
         let rows = max(terminalRows() - 8, 5)
         let flows = summary.flows
             .sorted { $0.totalBytes > $1.totalBytes }
@@ -132,7 +147,11 @@ final class TopView: @unchecked Sendable {
         output += "\nCtrl-C to stop."
 
         print(output)
+        advanceTick()
+    }
 
+    /// Snapshot cadence and self-test countdown, shared by both display modes.
+    private func advanceTick() {
         tickCount += 1
         if tickCount % Self.snapshotInterval == 0 {
             writePeriodicSnapshot()
@@ -142,7 +161,7 @@ final class TopView: @unchecked Sendable {
             ticksRemaining = remaining - 1
             if remaining - 1 <= 0 {
                 print("")
-                print("Self-test complete: the live view rendered without faulting.")
+                print("Self-test complete: the session ran without faulting.")
                 if let log {
                     log.section(
                         "FINAL REPORT",

@@ -32,8 +32,9 @@ struct Options {
                         at DIR/latest.log.
           --no-log      Do not write a transcript.
           --serve       Publish snapshots on a Unix socket for Beholder.app to read.
-                        Implies --top. The socket is owned by the user who ran sudo and
-                        created mode 0600.
+                        Draws nothing, so it can be left running in the background; add
+                        --top to also watch it in the terminal. The socket is owned by
+                        the user who ran sudo and created mode 0600.
           --socket PATH Publish somewhere other than \(WireProtocol.defaultSocketPath).
           --help        Show this message.
 
@@ -63,7 +64,6 @@ struct Options {
                 expectingSocketPath = true
             case "--serve":
                 options.serve = true
-                options.top = true
             case "--no-log":
                 options.logging = false
             case "--loopback", "-l":

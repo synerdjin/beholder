@@ -40,9 +40,10 @@ enum Beholderd {
             exit(0)
         }
 
-        // In --top mode the flow monitor consumes packets; otherwise they are only
-        // counted, since Phase 0's statistics view has no use for them.
-        let monitor = options.top ? FlowMonitor() : nil
+        // Flows are needed to draw the live view and to publish to the app. Without
+        // either, packets are only counted, which is all the statistics view wants.
+        let needsFlows = options.top || options.serve
+        let monitor = needsFlows ? FlowMonitor() : nil
         let packetHandler: PacketSink
         if let monitor {
             packetHandler = monitor.packetHandler()
@@ -160,13 +161,21 @@ enum Beholderd {
                 }
             }
 
-            let view = TopView(
-                monitor: monitor, engine: engine, supervisor: supervisor, log: log
+            let session = TopView(
+                monitor: monitor,
+                engine: engine,
+                supervisor: supervisor,
+                log: log,
+                rendersToTerminal: options.top
             )
-            view.installSignalHandlers()
-            view.start(stopAfterTicks: options.selfTest ? 3 : nil)
+            session.installSignalHandlers()
+            session.start(stopAfterTicks: options.selfTest ? 3 : nil)
             retained.append(monitor)
-            retained.append(view)
+            retained.append(session)
+
+            if !options.top {
+                print("Serving. Ctrl-C to stop.")
+            }
         } else {
             let reporter = StatisticsReporter(engine: engine)
             reporter.installSignalHandlers()
