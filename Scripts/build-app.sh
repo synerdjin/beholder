@@ -13,15 +13,18 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="$ROOT/.build/$CONFIGURATION"
 APP="$ROOT/.build/Beholder.app"
 
-echo "Building BeholderApp ($CONFIGURATION)…"
-swift build --package-path "$ROOT" --configuration "$CONFIGURATION" --product BeholderApp
+# Braces on every expansion, and plain ASCII in the messages. An unbraced "$APP…" makes
+# bash read the leading byte of the multibyte ellipsis as part of the variable name,
+# which under `set -u` aborts the script with a confusing "APP?: unbound variable".
+echo "Building BeholderApp (${CONFIGURATION})..."
+swift build --package-path "${ROOT}" --configuration "${CONFIGURATION}" --product BeholderApp
 
-echo "Assembling $APP…"
-rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "$BUILD_DIR/BeholderApp" "$APP/Contents/MacOS/Beholder"
+echo "Assembling ${APP}..."
+rm -rf "${APP}"
+mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
+cp "${BUILD_DIR}/BeholderApp" "${APP}/Contents/MacOS/Beholder"
 
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+cat > "${APP}/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -50,15 +53,17 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <false/>
 </dict>
 PLIST
-echo "</plist>" >> "$APP/Contents/Info.plist"
+echo "</plist>" >> "${APP}/Contents/Info.plist"
+
+plutil -lint "${APP}/Contents/Info.plist" > /dev/null
 
 # Ad-hoc signature. Enough for local execution since the app claims no entitlements;
 # replace with a Developer ID when one exists.
-codesign --force --sign - "$APP" 2>/dev/null || echo "note: ad-hoc signing skipped"
+codesign --force --sign - "${APP}" 2>/dev/null || echo "note: ad-hoc signing skipped"
 
 echo
-echo "Built $APP"
+echo "Built ${APP}"
 echo
 echo "Run the daemon first (it needs root), then open the app:"
-echo "  sudo $ROOT/.build/$CONFIGURATION/beholderd --serve --loopback"
-echo "  open $APP"
+echo "  sudo ${ROOT}/.build/${CONFIGURATION}/beholderd --serve --loopback"
+echo "  open ${APP}"
