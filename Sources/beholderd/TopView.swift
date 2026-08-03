@@ -294,6 +294,32 @@ final class TopView: @unchecked Sendable {
             )
         }
 
+        // Capture health belongs in the flow report too, not only in the statistics view.
+        // A kernel drop means the byte totals above are short by an unknown amount, and a
+        // report that cannot say so is quietly lying about its own accuracy.
+        let statistics = engine.statistics()
+        let dropped = statistics.reduce(0) { $0 + UInt64($1.kernelDropped) }
+        let captured = statistics.reduce(0) { $0 + $1.counters.packets }
+        lines.append(
+            "Capture: \(captured) packets across "
+                + statistics.map { "\($0.interfaceName) (\($0.linkLayer.name))" }
+                .joined(separator: ", ")
+                + "."
+        )
+        if dropped > 0 {
+            let share = Double(dropped) / Double(max(captured + dropped, 1)) * 100
+            lines.append(
+                String(
+                    format: """
+                        ⚠︎  %llu packets were dropped by the kernel (%.2f%%) — the BPF buffer \
+                        filled faster than Beholder drained it, so every byte total above is \
+                        an undercount.
+                        """,
+                    dropped, share
+                )
+            )
+        }
+
         let transitions = supervisor?.recordedTransitions() ?? []
         if !transitions.isEmpty {
             lines.append("")
