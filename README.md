@@ -90,10 +90,37 @@ With Threat Protection disabled the same traffic correctly resolves to
 Beholder detects a process that both dominates the flow table and reaches many distinct
 hosts, and says so, rather than quietly presenting the proxy as the culprit.
 
+**Phase 3a — hostnames. Done.**
+
+- [x] DNS answer parsing, including CNAME chains and AAAA records
+- [x] TLS SNI extraction from ClientHello
+- [x] Name cache with retention that outlives short DNS time-to-live values
+- [x] iCloud Private Relay ingress and egress recognition
+
+Names come from two sources. SNI names the host for one specific connection and is
+proof; a DNS answer says some name once resolved to an address, which is a good guess but
+not proof, since one address commonly serves many names. DNS-derived names are shown with
+a leading `·` so the two are never confused.
+
+Neither source can see through Encrypted Client Hello or DNS-over-HTTPS, and neither can
+see past iCloud Private Relay, which is labelled explicitly rather than shown as an
+unexplained Apple address.
+
+**Phase 3b — capture follows the route. Done.**
+
+Capture used to resolve the default route once at startup. Connect a VPN and the route
+moves to a `utun`; drop it and it returns to `en0` — either way capture carried on
+reading an interface nothing used any more, reporting a confident, well-formatted zero.
+Changes are now detected by `NWPathMonitor` plus a slow backstop poll, and every
+transition is shown, so a reconnect is visible rather than inferred from a gap.
+
+Naming interfaces explicitly disables following: that is read as an instruction to stay
+put, not a hint.
+
 **Later**
 
 - [ ] XPC + SwiftUI app — Phase 2
-- [ ] DNS/SNI enrichment, GeoIP, map — Phase 3
+- [ ] GeoIP and the world map — rest of Phase 3
 - [ ] SQLite history — Phase 4
 
 ## Building and running

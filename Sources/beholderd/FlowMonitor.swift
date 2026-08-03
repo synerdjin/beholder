@@ -138,6 +138,17 @@ final class FlowMonitor: @unchecked Sendable {
         addressTimer = nil
     }
 
+    /// Re-reads the machine's interface addresses at once.
+    ///
+    /// Called when the route moves, because the local address changes with it. Waiting
+    /// for the periodic refresh would leave every new flow keyed against a stale address
+    /// set, and `FlowKey` decides direction by asking which end is local — so inbound and
+    /// outbound would be reported backwards until the next tick.
+    func refreshLocalAddresses() {
+        let current = LocalAddresses.current()
+        flowQueue.async { self.localAddresses = current }
+    }
+
     // MARK: - Attribution
 
     /// Runs on attributionQueue.

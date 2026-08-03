@@ -9,7 +9,8 @@ import Foundation
 /// history browser — is a different presentation of exactly this data.
 final class TopView: @unchecked Sendable {
     private let monitor: FlowMonitor
-    private let interfaces: [String]
+    private let engine: CaptureEngine
+    private let supervisor: InterfaceSupervisor?
     private let queue = DispatchQueue(label: "com.beholder.topview")
     private var timer: DispatchSourceTimer?
     private var signalSources: [DispatchSourceSignal] = []
@@ -23,9 +24,16 @@ final class TopView: @unchecked Sendable {
 
     private static let clearScreen = "\u{1B}[H\u{1B}[J"
 
-    init(monitor: FlowMonitor, interfaces: [String]) {
+    init(monitor: FlowMonitor, engine: CaptureEngine, supervisor: InterfaceSupervisor?) {
         self.monitor = monitor
-        self.interfaces = interfaces
+        self.engine = engine
+        self.supervisor = supervisor
+    }
+
+    /// Read live rather than captured at startup, so a route change is reflected in the
+    /// header instead of the display insisting on an interface no longer in use.
+    private var interfaces: [String] {
+        engine.activeInterfaces
     }
 
     /// `stopAfterTicks` bounds the run, used by `--self-test` to exercise the render path
@@ -93,6 +101,12 @@ final class TopView: @unchecked Sendable {
                 notes.append("\(summary.evictedFlowCount) flows evicted (table full)")
             }
             output += notes.joined(separator: "  ·  ") + "\n"
+        }
+
+        // A route change mid-run is exactly the event a user would otherwise mistake for
+        // the tool breaking, so the most recent one stays on screen.
+        if let latest = supervisor?.recordedTransitions().last {
+            output += "↻ \(latest.summary)\n"
         }
         output += "\n"
 
@@ -242,6 +256,15 @@ final class TopView: @unchecked Sendable {
                 "\(summary.evictedFlowCount) flows were evicted — the table hit its cap, "
                     + "so these totals are an undercount."
             )
+        }
+
+        let transitions = supervisor?.recordedTransitions() ?? []
+        if !transitions.isEmpty {
+            print("")
+            print("Interface changes during this run:")
+            for transition in transitions {
+                print("  \(transition.summary)")
+            }
         }
 
         // A proxy fronting other apps makes every per-process number below misleading,

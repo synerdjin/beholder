@@ -52,9 +52,12 @@ enum Beholderd {
         let engine = CaptureEngine(onPacket: packetHandler)
 
         var interfaces: [String] = []
+        var followedInterface: String?
 
         if !options.selfTest {
-            interfaces = resolveInterfaces(options)
+            let resolved = resolveInterfaces(options)
+            interfaces = resolved.interfaces
+            followedInterface = resolved.followed
             for interface in interfaces {
                 do {
                     try engine.start(interface: interface)
@@ -82,7 +85,29 @@ enum Beholderd {
 
         if let monitor {
             monitor.start()
-            let view = TopView(monitor: monitor, interfaces: interfaces)
+
+            // Only supervise when Beholder chose the interface. An explicit interface
+            // list is an instruction to stay put.
+            //
+            // The self-test supervises too, with nothing yet followed: reconcile() then
+            // finds the real default route and tries to capture it, which without root
+            // fails and records a failed transition. That exercises route lookup, the
+            // failure path and transition recording without needing privilege.
+            var supervisor: InterfaceSupervisor?
+            if followedInterface != nil || options.selfTest {
+                let pinned = interfaces.filter { $0 != followedInterface }
+                let created = InterfaceSupervisor(
+                    engine: engine,
+                    pinned: pinned,
+                    initiallyFollowing: followedInterface,
+                    onChange: { [weak monitor] in monitor?.refreshLocalAddresses() }
+                )
+                created.start()
+                supervisor = created
+                retained.append(created)
+            }
+
+            let view = TopView(monitor: monitor, engine: engine, supervisor: supervisor)
             view.installSignalHandlers()
             view.start(stopAfterTicks: options.selfTest ? 3 : nil)
             retained.append(monitor)
@@ -97,21 +122,30 @@ enum Beholderd {
         dispatchMain()
     }
 
-    private static func resolveInterfaces(_ options: Options) -> [String] {
+    /// Works out what to capture, and whether to keep following the default route.
+    ///
+    /// Naming interfaces explicitly is taken as an instruction, not a hint: if the user
+    /// asked for `en0`, capture stays on `en0` even when routing moves elsewhere.
+    /// Following only happens when the choice was left to Beholder.
+    private static func resolveInterfaces(
+        _ options: Options
+    ) -> (interfaces: [String], followed: String?) {
         var interfaces = options.interfaces
+        var followed: String?
 
         if interfaces.isEmpty {
             guard let route = RouteLookup.defaultRoute() else {
                 fail("could not determine the default route.")
             }
             interfaces = [route.interfaceName]
+            followed = route.interfaceName
             print("Default route leaves via \(route)")
         }
 
         if options.includeLoopback, !interfaces.contains("lo0") {
             interfaces.append("lo0")
         }
-        return interfaces
+        return (interfaces, followed)
     }
 
     private static func fail(_ message: String) -> Never {
