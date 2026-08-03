@@ -126,6 +126,40 @@ enum Beholderd {
                 retained.append(created)
             }
 
+            if options.serve {
+                let startedAt = Date()
+                // Bound to a `let` so the snapshot closure captures an immutable value.
+                let activeSupervisor = supervisor
+                let server = FlowServer(path: options.socketPath) { [weak monitor, weak engine] in
+                    guard let monitor, let engine else {
+                        return FlowSnapshot(
+                            generatedAt: Date(), startedAt: startedAt,
+                            interfaces: [], flows: [], statistics: WireStatistics()
+                        )
+                    }
+                    let statistics = engine.statistics()
+                    return monitor.wireSnapshot(
+                        startedAt: startedAt,
+                        interfaces: statistics.map(\.interfaceName),
+                        packetsCaptured: statistics.reduce(0) { $0 + $1.counters.packets },
+                        packetsDropped: statistics.reduce(0) { $0 + UInt64($1.kernelDropped) },
+                        transitions: activeSupervisor?.recordedTransitions().map(\.summary) ?? []
+                    )
+                }
+                do {
+                    try server.start()
+                    print("Publishing on \(options.socketPath) — open Beholder.app to view")
+                    retained.append(server)
+                } catch let error as FlowServer.ServerError {
+                    // The terminal view still works, so this is a warning, not a failure.
+                    FileHandle.standardError.write(
+                        Data("beholderd: \(error.description); continuing without it.\n".utf8)
+                    )
+                } catch {
+                    FileHandle.standardError.write(Data("beholderd: \(error)\n".utf8))
+                }
+            }
+
             let view = TopView(
                 monitor: monitor, engine: engine, supervisor: supervisor, log: log
             )

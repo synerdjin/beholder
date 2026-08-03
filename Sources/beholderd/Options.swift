@@ -1,3 +1,4 @@
+import BeholderCore
 import Foundation
 
 struct Options {
@@ -8,6 +9,8 @@ struct Options {
     var top = false
     var logDirectory: String?
     var logging = true
+    var serve = false
+    var socketPath = WireProtocol.defaultSocketPath
 
     static let usage = """
         usage: beholderd [--top] [--loopback] [--log DIR | --no-log]
@@ -28,6 +31,10 @@ struct Options {
                         lists every host this machine contacted. The newest run is always
                         at DIR/latest.log.
           --no-log      Do not write a transcript.
+          --serve       Publish snapshots on a Unix socket for Beholder.app to read.
+                        Implies --top. The socket is owned by the user who ran sudo and
+                        created mode 0600.
+          --socket PATH Publish somewhere other than \(WireProtocol.defaultSocketPath).
           --help        Show this message.
 
         Capture requires root: it reads /dev/bpf*, which is mode 0600 root:wheel.
@@ -36,6 +43,7 @@ struct Options {
     static func parse(_ arguments: [String]) -> Options? {
         var options = Options()
         var expectingLogDirectory = false
+        var expectingSocketPath = false
 
         for argument in arguments {
             if expectingLogDirectory {
@@ -43,9 +51,19 @@ struct Options {
                 expectingLogDirectory = false
                 continue
             }
+            if expectingSocketPath {
+                options.socketPath = argument
+                expectingSocketPath = false
+                continue
+            }
             switch argument {
             case "--log":
                 expectingLogDirectory = true
+            case "--socket":
+                expectingSocketPath = true
+            case "--serve":
+                options.serve = true
+                options.top = true
             case "--no-log":
                 options.logging = false
             case "--loopback", "-l":
@@ -71,6 +89,10 @@ struct Options {
 
         guard !expectingLogDirectory else {
             FileHandle.standardError.write(Data("beholderd: --log needs a directory\n".utf8))
+            return nil
+        }
+        guard !expectingSocketPath else {
+            FileHandle.standardError.write(Data("beholderd: --socket needs a path\n".utf8))
             return nil
         }
         return options

@@ -246,6 +246,42 @@ final class FlowMonitor: @unchecked Sendable {
         var privateRelayFlowCount: Int
     }
 
+    /// Builds the published form of the current state.
+    func wireSnapshot(
+        startedAt: Date,
+        interfaces: [String],
+        packetsCaptured: UInt64,
+        packetsDropped: UInt64,
+        transitions: [String]
+    ) -> FlowSnapshot {
+        let current = summary()
+
+        var statistics = WireStatistics()
+        statistics.flowCount = current.flowCount
+        statistics.processCount = current.processCount
+        statistics.unattributedCount = current.unattributedCount
+        statistics.unattributableCount = current.unattributableCount
+        statistics.namedFlowCount = current.namedFlowCount
+        statistics.cachedNameCount = current.cachedNameCount
+        statistics.privateRelayFlowCount = current.privateRelayFlowCount
+        statistics.evictedFlowCount = current.evictedFlowCount
+        statistics.totalBytesOut = current.totalBytesOut
+        statistics.totalBytesIn = current.totalBytesIn
+        statistics.packetsCaptured = packetsCaptured
+        statistics.packetsDropped = packetsDropped
+        statistics.interfaceTransitions = transitions
+        statistics.warnings = ProxyDetection.findLikelyProxies(in: current.flows)
+            .map(\.advice)
+
+        return FlowSnapshot(
+            generatedAt: Date(),
+            startedAt: startedAt,
+            interfaces: interfaces,
+            flows: current.flows.map { $0.wireRepresentation() },
+            statistics: statistics
+        )
+    }
+
     func summary() -> Summary {
         flowQueue.sync {
             let flows = table.activeFlows()

@@ -29,6 +29,15 @@ let package = Package(
             dependencies: ["BeholderCore", "CBeholderShim"]
         ),
 
+        // The SwiftUI viewer. Runs unprivileged; it only reads the daemon's socket.
+        // Scripts/build-app.sh wraps this binary in a .app bundle, which is what
+        // MenuBarExtra and the Dock need. There is no Xcode project because none is
+        // required: the bundle is a directory with an Info.plist in it.
+        .executableTarget(
+            name: "BeholderApp",
+            dependencies: ["BeholderCore"]
+        ),
+
         .testTarget(
             name: "BeholderCoreTests",
             dependencies: ["BeholderCore"]

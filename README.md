@@ -117,9 +117,35 @@ transition is shown, so a reconnect is visible rather than inferred from a gap.
 Naming interfaces explicitly disables following: that is read as an instruction to stay
 put, not a hint.
 
+**Phase 2 — the app. Done.**
+
+- [x] Daemon publishes snapshots over a Unix domain socket
+- [x] SwiftUI viewer: connections grouped by process, with application icons
+- [x] Menu bar extra showing live throughput
+- [x] Throughput chart (Swift Charts)
+- [x] Caveats surfaced in the UI rather than buried
+
+```bash
+sudo ./.build/debug/beholderd --serve --loopback   # capture, needs root
+./Scripts/build-app.sh && open .build/Beholder.app # viewer, does not
+```
+
+The plan called for XPC. XPC to a root daemon means registering it under
+`/Library/LaunchDaemons` — a persistent system change, and realistically one wanting a
+signing identity to be pleasant. A Unix socket carrying newline-delimited JSON needs
+neither, so the app works today and the daemon stays something started and stopped by
+hand. The socket is 0600 and owned by the user who ran `sudo`, for the same reason the
+transcript is.
+
+The daemon publishes and never accepts commands. While there is no signing identity to
+validate a peer with, an unauthenticated *reader* can only see what `lsof` would already
+show it; an unauthenticated writer would be a real hole.
+
+There is no Xcode project. A macOS app bundle is a directory with an `Info.plist` in it,
+and `Scripts/build-app.sh` arranges one around the SwiftPM binary.
+
 **Later**
 
-- [ ] XPC + SwiftUI app — Phase 2
 - [ ] GeoIP and the world map — rest of Phase 3
 - [ ] SQLite history — Phase 4
 
