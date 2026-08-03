@@ -107,6 +107,9 @@ public struct WireStatistics: Codable, Sendable, Hashable {
     /// different facts, and a single total hides which happened.
     public var outgoingCount = 0
     public var incomingCount = 0
+    /// Connections whose initiator could not be established. Reported rather than folded
+    /// into either side, so neither number claims more than was observed.
+    public var undeterminedDirectionCount = 0
     public var unattributedCount = 0
     public var unattributableCount = 0
     public var namedFlowCount = 0
@@ -193,7 +196,13 @@ extension Flow {
             tcpState: tcpState.map(String.init(describing:)),
             firstSeen: firstSeen,
             lastSeen: lastSeen,
-            isOutgoing: initiatedLocally,
+            isOutgoing: {
+                switch direction {
+                case .outgoing: return true
+                case .incoming: return false
+                case .undetermined: return nil
+                }
+            }(),
             initiationIsCertain: initiationIsCertain
         )
     }

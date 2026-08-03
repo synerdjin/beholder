@@ -6,6 +6,18 @@ public enum FlowDirection: Sendable, Hashable {
     case inbound
 }
 
+/// Who opened a connection.
+public enum ConnectionDirection: Sendable, Hashable {
+    /// This machine reached out.
+    case outgoing
+    /// Something reached in.
+    case incoming
+    /// Not determinable from what was observed. Reported as such rather than guessed:
+    /// claiming an inbound connection that never happened is alarming in a way that
+    /// saying "unknown" is not.
+    case undetermined
+}
+
 /// Identifies one conversation, normalised so that both directions of the same
 /// conversation produce the same key.
 ///
@@ -132,6 +144,36 @@ public struct Flow: Sendable {
         self.interfaceName = interfaceName
         self.firstSeen = timestamp
         self.lastSeen = timestamp
+    }
+
+    /// macOS allocates ephemeral client ports from here upward
+    /// (`net.inet.ip.portrange.first`). A socket bound below it is nearly always a
+    /// service rather than a client.
+    public static let ephemeralPortFloor: UInt16 = 49152
+
+    /// The best available reading of who opened this connection.
+    ///
+    /// Watching the SYN settles it. Failing that, port allocation is the next best
+    /// evidence: an ephemeral local port talking to a service port is a connection this
+    /// machine made.
+    ///
+    /// Note what is deliberately *not* used here — which side sent the first packet
+    /// Beholder happened to see. For a connection already established when capture
+    /// started, that is decided by whichever end spoke next, which is a coin flip. An
+    /// earlier version used it and duly reported seven inbound connections to a laptop
+    /// behind a VPN, every one of them an outgoing connection misread.
+    public var direction: ConnectionDirection {
+        if initiationIsCertain {
+            return initiatedLocally == true ? .outgoing : .incoming
+        }
+        let localIsEphemeral = key.localPort >= Self.ephemeralPortFloor
+        let remoteIsEphemeral = key.remotePort >= Self.ephemeralPortFloor
+        if localIsEphemeral != remoteIsEphemeral {
+            return localIsEphemeral ? .outgoing : .incoming
+        }
+        // Both ends ephemeral, or both privileged: loopback pairs and peer-to-peer
+        // traffic land here, and there is nothing left to reason from.
+        return .undetermined
     }
 
     public var totalBytes: UInt64 { bytesOut + bytesIn }

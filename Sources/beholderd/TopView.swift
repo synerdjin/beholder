@@ -258,6 +258,11 @@ final class TopView: @unchecked Sendable {
         )
         lines.append(rule)
         lines.append(
+            "Direction: \(summary.outgoingCount) outgoing, "
+                + "\(summary.incomingCount) incoming, "
+                + "\(summary.undeterminedDirectionCount) undetermined."
+        )
+        lines.append(
             """
             \(summary.flowCount) flows, \(summary.processCount) processes, \
             \(formatBytes(Double(summary.totalBytesOut))) up, \

@@ -211,6 +211,60 @@ struct FlowTableTests {
         #expect(flow.initiationIsCertain)
     }
 
+    /// Regression: a connection already established when capture began has no SYN to
+    /// observe, and whichever end happens to speak next is a coin flip. Using that as the
+    /// verdict reported seven inbound connections on a laptop behind a VPN — every one of
+    /// them an outgoing connection misread. Port allocation is the right evidence.
+    @Test("A pre-existing connection first seen inbound is still outgoing")
+    func preExistingConnectionIsNotIncoming() throws {
+        let table = FlowTable()
+        // No handshake: capture joined an established connection, inbound packet first.
+        table.record(
+            packet(from: server, port: 443, to: laptop, port: 51234),
+            interfaceName: "utun8", localAddresses: localAddresses
+        )
+        let flow = try #require(table.activeFlows().first)
+
+        #expect(!flow.initiationIsCertain)
+        #expect(flow.direction == .outgoing, "ephemeral local port to port 443 is outgoing")
+    }
+
+    @Test("A connection to our own service port is incoming")
+    func serviceportConnectionIsIncoming() throws {
+        let table = FlowTable()
+        table.record(
+            packet(from: server, port: 52000, to: laptop, port: 22),
+            interfaceName: "en0", localAddresses: localAddresses
+        )
+        #expect(try #require(table.activeFlows().first).direction == .incoming)
+    }
+
+    /// Two ephemeral ports leave nothing to reason from. Saying so beats guessing:
+    /// a fabricated inbound connection is alarming in a way "unknown" is not.
+    @Test("Two ephemeral ports are reported as undetermined, not guessed")
+    func ambiguousPortsAreUndetermined() throws {
+        let table = FlowTable()
+        table.record(
+            packet(from: loopback, port: 51000, to: loopback, port: 52000),
+            interfaceName: "lo0", localAddresses: localAddresses
+        )
+        #expect(try #require(table.activeFlows().first).direction == .undetermined)
+    }
+
+    /// An observed handshake always outranks the port inference.
+    @Test("A witnessed SYN overrides the port heuristic")
+    func synBeatsPortHeuristic() throws {
+        let table = FlowTable()
+        // Ports say "incoming"; the SYN we watched leave says otherwise.
+        table.record(
+            packet(from: laptop, port: 22, to: server, port: 52000, flags: .syn),
+            interfaceName: "en0", localAddresses: localAddresses
+        )
+        let flow = try #require(table.activeFlows().first)
+        #expect(flow.initiationIsCertain)
+        #expect(flow.direction == .outgoing)
+    }
+
     @Test("Idle flows are retired, active ones are kept")
     func idleFlowsExpire() {
         let table = FlowTable()

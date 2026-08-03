@@ -1,0 +1,44 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:beholder}",
+            "name": "Debug beholderd",
+            "target": "beholderd",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug beholderd"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:beholder}",
+            "name": "Release beholderd",
+            "target": "beholderd",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release beholderd"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:beholder}",
+            "name": "Debug BeholderApp",
+            "target": "BeholderApp",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug BeholderApp"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:beholder}",
+            "name": "Release BeholderApp",
+            "target": "BeholderApp",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release BeholderApp"
+        }
+    ]
+}

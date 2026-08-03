@@ -246,6 +246,7 @@ final class FlowMonitor: @unchecked Sendable {
         var privateRelayFlowCount: Int
         var outgoingCount: Int
         var incomingCount: Int
+        var undeterminedDirectionCount: Int
     }
 
     /// Builds the published form of the current state.
@@ -268,6 +269,7 @@ final class FlowMonitor: @unchecked Sendable {
         statistics.privateRelayFlowCount = current.privateRelayFlowCount
         statistics.outgoingCount = current.outgoingCount
         statistics.incomingCount = current.incomingCount
+        statistics.undeterminedDirectionCount = current.undeterminedDirectionCount
         statistics.evictedFlowCount = current.evictedFlowCount
         statistics.totalBytesOut = current.totalBytesOut
         statistics.totalBytesIn = current.totalBytesIn
@@ -296,6 +298,7 @@ final class FlowMonitor: @unchecked Sendable {
             var privateRelay = 0
             var outgoing = 0
             var accepted = 0
+            var undetermined = 0
             var out: UInt64 = 0
             var incoming: UInt64 = 0
 
@@ -307,10 +310,10 @@ final class FlowMonitor: @unchecked Sendable {
                 } else {
                     unattributable += 1
                 }
-                switch flow.initiatedLocally {
-                case true: outgoing += 1
-                case false: accepted += 1
-                case nil: break
+                switch flow.direction {
+                case .outgoing: outgoing += 1
+                case .incoming: accepted += 1
+                case .undetermined: undetermined += 1
                 }
                 if flow.hostName != nil { named += 1 }
                 if NameResolutionCache.classify(hostName: flow.hostName) == .privateRelay {
@@ -335,7 +338,8 @@ final class FlowMonitor: @unchecked Sendable {
                 cachedNameCount: names.count,
                 privateRelayFlowCount: privateRelay,
                 outgoingCount: outgoing,
-                incomingCount: accepted
+                incomingCount: accepted,
+                undeterminedDirectionCount: undetermined
             )
         }
     }

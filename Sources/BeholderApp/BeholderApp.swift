@@ -243,6 +243,19 @@ private struct WaitingView: View {
     }
 }
 
+/// "5 outgoing · 2 incoming · 1 undetermined · 7 processes", omitting whatever is zero.
+func directionSummary(_ statistics: WireStatistics) -> String {
+    var parts = [pluralised(statistics.outgoingCount, "outgoing connection")]
+    if statistics.incomingCount > 0 {
+        parts.append("\(statistics.incomingCount) incoming")
+    }
+    if statistics.undeterminedDirectionCount > 0 {
+        parts.append("\(statistics.undeterminedDirectionCount) undetermined")
+    }
+    parts.append(pluralised(statistics.processCount, "process", plural: "processes"))
+    return parts.joined(separator: " · ")
+}
+
 private struct HeaderView: View {
     let snapshot: FlowSnapshot
     let history: [FlowClient.ThroughputSample]
@@ -252,13 +265,14 @@ private struct HeaderView: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text(snapshot.interfaces.joined(separator: ", "))
                     .font(.headline)
-                Text(
-                    "\(pluralised(snapshot.statistics.outgoingCount, "outgoing connection"))"
-                        + (snapshot.statistics.incomingCount > 0
-                            ? " · \(snapshot.statistics.incomingCount) incoming" : "")
-                        + " · \(pluralised(snapshot.statistics.processCount, "process", plural: "processes"))"
-                )
-                .foregroundStyle(.secondary)
+                Text(directionSummary(snapshot.statistics))
+                    .foregroundStyle(.secondary)
+                    .help(
+                        "Direction comes from the opening handshake where it was seen, "
+                            + "and from port allocation otherwise. Connections that "
+                            + "cannot be established either way are counted separately "
+                            + "rather than assumed."
+                    )
 
                 let attributable = snapshot.statistics.attributableCount
                 if attributable > 0 {
