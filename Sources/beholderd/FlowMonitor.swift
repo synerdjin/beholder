@@ -24,6 +24,9 @@ final class FlowMonitor: @unchecked Sendable {
     /// large, separately licensed, and fetched deliberately.
     private let geography = GeoIPDatabase.loadFromStandardPaths()
     private var reverseResolver: ReverseResolver?
+    /// Nil when no tracker index is installed. Fetched deliberately, like geolocation,
+    /// because its data carries a NonCommercial licence.
+    private let trackers = TrackerDatabase.loadFromStandardPaths()
 
     /// Where learned names are kept between runs. Under the user's own directory rather
     /// than a system path, since it records everywhere the machine has been.
@@ -103,7 +106,15 @@ final class FlowMonitor: @unchecked Sendable {
             // pushing names out immediately is what makes the very first flow to a host
             // show a name rather than an address.
             table.applyNames { self.names.resolved(for: $0) }
+            classifyNamedFlows()
         }
+    }
+
+    /// Runs on flowQueue. A flow only becomes classifiable once it has a name, so this
+    /// follows every naming pass rather than running on its own schedule.
+    private func classifyNamedFlows() {
+        guard let trackers else { return }
+        table.applyClassifications { trackers.classify(hostName: $0) }
     }
 
     /// Runs on flowQueue. Asks for an attribution pass right now, because a socket that
@@ -144,6 +155,7 @@ final class FlowMonitor: @unchecked Sendable {
                     source: .reverseLookup
                 )
                 self.table.applyNames { self.names.resolved(for: $0) }
+                self.classifyNamedFlows()
             }
         }
         reverseResolver = resolver
@@ -245,6 +257,7 @@ final class FlowMonitor: @unchecked Sendable {
         }
         table.refreshState { key in resolve(key, in: snapshot)?.tcpState }
         table.applyNames { self.names.resolved(for: $0, at: now) }
+        classifyNamedFlows()
         if let geography {
             table.applyLocations { geography.location(for: $0) }
         }

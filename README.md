@@ -254,3 +254,38 @@ costs a daemon almost no resident memory.
 
 > This product includes GeoLite data created by DB-IP, available from
 > <https://db-ip.com/>, licensed under CC BY 4.0.
+
+## Who is on the other end
+
+```bash
+make trackers
+```
+
+Installs an ownership index built from DuckDuckGo's tracker blocklist, letting the app
+group connections by the company operating them rather than only by the app making them —
+"Google, 14 connections" is a question no per-process listing can answer, since one
+company is reached by many apps and one app talks to many companies.
+
+**Licence:** the Tracker Radar data is CC BY-NC-SA 4.0 — NonCommercial and ShareAlike.
+That is why it is fetched rather than committed. Personal use is fine; commercial use
+needs permission from DuckDuckGo.
+
+> Tracker data from DuckDuckGo Tracker Radar, Copyright (c) 2020 Duck Duck Go, Inc.,
+> licensed under CC BY-NC-SA 4.0.
+
+### What it does and does not know
+
+Tracker Radar is built by crawling websites, so it covers third-party web trackers
+thoroughly and native application telemetry not at all. Measured against real capture
+transcripts from this machine, `static.xx.fbcdn.net` and `mobile.events.data.microsoft.com`
+are identified, while `telemetry.individual.githubcopilot.com` and `crash.steampowered.com`
+appear in no tracker list whatsoever.
+
+Beholder therefore reports a second, separate signal: whether the hostname contains a word
+operators conventionally use for data collection. That is a fact about the *name*, not
+about behaviour, and it is labelled that way.
+
+Nothing here is a verdict. `api.anthropic.com` is an application doing its job and
+`browser-intake-us5-datadoghq.com` is telemetry, yet both are an app talking to its vendor
+over TLS — only the person using the machine can judge which they mind. Being
+**unrecognised** is likewise the ordinary condition of most of the internet, not a finding.

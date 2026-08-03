@@ -49,9 +49,12 @@ public struct WireFlow: Codable, Sendable, Identifiable, Hashable {
     public let firstSeen: Date
     public let lastSeen: Date
 
+    /// Where the far end is, when a geolocation database is installed.
+    public let location: GeoLocation?
+    /// Who operates the far end, when a tracker database recognises it.
+    public let classification: HostClassification?
     /// True when this machine opened the connection. Nil when nothing has been observed
     /// yet, which in practice never reaches a client.
-    public let location: GeoLocation?
     public let isOutgoing: Bool?
     /// True when `isOutgoing` came from watching the opening handshake rather than being
     /// inferred from which direction moved first.
@@ -72,9 +75,11 @@ public struct WireFlow: Codable, Sendable, Identifiable, Hashable {
         hostName: String?, hostNameIsProof: Bool, isPrivateRelay: Bool,
         bytesOut: UInt64, bytesIn: UInt64, packetsOut: UInt64, packetsIn: UInt64,
         tcpState: String?, firstSeen: Date, lastSeen: Date,
-        location: GeoLocation?, isOutgoing: Bool?, initiationIsCertain: Bool
+        location: GeoLocation?, classification: HostClassification?,
+        isOutgoing: Bool?, initiationIsCertain: Bool
     ) {
         self.location = location
+        self.classification = classification
         self.isOutgoing = isOutgoing
         self.initiationIsCertain = initiationIsCertain
         self.id = id
@@ -199,6 +204,7 @@ extension Flow {
             firstSeen: firstSeen,
             lastSeen: lastSeen,
             location: location,
+            classification: classification,
             isOutgoing: {
                 switch direction {
                 case .outgoing: return true

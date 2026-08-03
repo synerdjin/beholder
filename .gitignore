@@ -13,3 +13,6 @@ Resources/geoip/
 # must never be committed.
 logs/
 *.log
+
+# Tracker data is CC BY-NC-SA 4.0 — fetched via Scripts/fetch-trackers.sh, not redistributed here.
+Resources/trackers/

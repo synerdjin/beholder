@@ -154,6 +154,8 @@ private enum Presentation: String, CaseIterable, Identifiable {
 private struct MainView: View {
     let client: FlowClient
     @State private var presentation: Presentation = .connections
+    @State private var grouping: Grouping = .process
+    @State private var unrecognisedOnly = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -167,7 +169,13 @@ private struct MainView: View {
                 WarningsView(statistics: snapshot.statistics)
                 switch presentation {
                 case .connections:
-                    ConnectionsView(snapshot: snapshot)
+                    GroupingBar(grouping: $grouping, unrecognisedOnly: $unrecognisedOnly)
+                    Divider()
+                    ConnectionsView(
+                        snapshot: snapshot,
+                        grouping: $grouping,
+                        unrecognisedOnly: $unrecognisedOnly
+                    )
                 case .map:
                     ConnectionMapView(snapshot: snapshot)
                 }

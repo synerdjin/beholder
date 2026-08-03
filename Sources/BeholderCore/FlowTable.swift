@@ -131,6 +131,19 @@ public final class FlowTable {
         }
     }
 
+    /// Identifies the operator behind each named flow. Re-applied when a name changes,
+    /// since a flow only becomes classifiable once it has a hostname.
+    public func applyClassifications(_ classify: (String) -> HostClassification) {
+        for (key, flow) in flows {
+            guard let hostName = flow.hostName else { continue }
+            if flow.classification != nil, flow.classification?.matchedDomain != nil {
+                continue
+            }
+            let result = classify(hostName)
+            flows[key]?.classification = result.isEmpty ? nil : result
+        }
+    }
+
     /// Whether any flow is still waiting to be attributed. Drives the adaptive poll rate:
     /// there is no point walking every process's file descriptors when nothing is
     /// unresolved.

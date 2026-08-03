@@ -88,6 +88,21 @@ geoip-status: ## Report whether a geolocation database is installed
 		if [ -f "$$p" ]; then echo "installed: $$p ($$(du -h $$p | cut -f1))"; exit 0; fi; \
 	done; echo "not installed - run 'make geoip'"
 
+# ------------------------------------------------------------------ classification
+
+.PHONY: trackers
+trackers: ## Download the tracker ownership index (DuckDuckGo, CC BY-NC-SA 4.0)
+	./Scripts/fetch-trackers.sh
+
+.PHONY: trackers-status
+trackers-status: ## Report whether the tracker index is installed
+	@for p in /usr/local/share/beholder/trackers.json Resources/trackers/trackers.json; do \
+		if [ -f "$$p" ]; then echo "installed: $$p ($$(du -h $$p | cut -f1))"; exit 0; fi; \
+	done; echo "not installed - run 'make trackers'"
+
+.PHONY: data
+data: geoip trackers ## Download both optional databases
+
 # ------------------------------------------------------------------------ evidence
 
 .PHONY: log

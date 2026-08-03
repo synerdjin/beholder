@@ -22,9 +22,23 @@ func formatBytes(_ bytes: Double) -> String {
         : String(format: "%.1f %@", value, units[unitIndex])
 }
 
-/// Connections grouped by the process that owns them.
+/// How the connection list is organised.
+enum Grouping: String, CaseIterable, Identifiable {
+    /// What is running on this machine.
+    case process = "By app"
+    /// Who is on the other end. This is the view that answers "how much of my traffic
+    /// goes to Google", which no per-process listing can show — one company is reached by
+    /// many apps, and one app talks to many companies.
+    case company = "By company"
+
+    var id: String { rawValue }
+}
+
+/// Connections grouped by the process that owns them, or by the company on the far end.
 struct ConnectionsView: View {
     let snapshot: FlowSnapshot
+    @Binding var grouping: Grouping
+    @Binding var unrecognisedOnly: Bool
     @State private var expanded: Set<String> = []
     @State private var searchText = ""
 
@@ -39,32 +53,57 @@ struct ConnectionsView: View {
     }
 
     private var groups: [Group] {
-        let matching = searchText.isEmpty
-            ? snapshot.flows
-            : snapshot.flows.filter { flow in
+        var matching = snapshot.flows
+
+        if !searchText.isEmpty {
+            let needle = searchText.lowercased()
+            matching = matching.filter { flow in
                 let haystack = [
                     flow.processName, flow.hostName, flow.remoteAddress,
-                    String(flow.remotePort),
+                    String(flow.remotePort), flow.classification?.owner,
                 ]
                 .compactMap { $0 }.joined(separator: " ").lowercased()
-                return haystack.contains(searchText.lowercased())
+                return haystack.contains(needle)
             }
-
-        var byProcess: [String: [WireFlow]] = [:]
-        for flow in matching {
-            // Unattributed flows are collected rather than hidden: a connection nobody
-            // can account for is the most interesting row on the screen.
-            let key = flow.pid.map(String.init) ?? "unknown"
-            byProcess[key, default: []].append(flow)
         }
 
-        return byProcess.map { key, flows in
-            Group(
-                id: key,
-                name: flows.first?.processName ?? "Unattributed",
-                pid: flows.first?.pid,
-                flows: flows.sorted { $0.totalBytes > $1.totalBytes }
-            )
+        if unrecognisedOnly {
+            matching = matching.filter { $0.classification?.isRecognised != true }
+        }
+
+        var buckets: [String: [WireFlow]] = [:]
+        for flow in matching {
+            // Flows with no owner are collected rather than hidden: a connection nobody
+            // can account for is the most interesting row on the screen.
+            let key: String
+            switch grouping {
+            case .process:
+                key = flow.pid.map(String.init) ?? "unattributed"
+            case .company:
+                key = flow.classification?.owner ?? "unrecognised"
+            }
+            buckets[key, default: []].append(flow)
+        }
+
+        return buckets.map { key, flows in
+            let first = flows.first
+            switch grouping {
+            case .process:
+                return Group(
+                    id: key,
+                    name: first?.processName ?? "Unattributed",
+                    pid: first?.pid,
+                    flows: flows.sorted { $0.totalBytes > $1.totalBytes }
+                )
+            case .company:
+                return Group(
+                    id: key,
+                    name: first?.classification?.owner ?? "Unrecognised",
+                    // No single pid represents a company, so no icon.
+                    pid: nil,
+                    flows: flows.sorted { $0.totalBytes > $1.totalBytes }
+                )
+            }
         }
         .sorted { $0.totalBytes > $1.totalBytes }
     }
@@ -91,7 +130,8 @@ struct ConnectionsView: View {
                         pid: group.pid,
                         connectionCount: group.flows.count,
                         bytesOut: group.bytesOut,
-                        bytesIn: group.bytesIn
+                        bytesIn: group.bytesIn,
+                        grouping: grouping
                     )
                 }
             }
@@ -106,9 +146,23 @@ private struct ProcessRow: View {
     let connectionCount: Int
     let bytesOut: UInt64
     let bytesIn: UInt64
+    let grouping: Grouping
+
+    /// Dimmed only for the catch-all buckets, not for every company row — in company
+    /// grouping there is no pid, and dimming on that basis would grey out everything.
+    private var isPlaceholder: Bool {
+        grouping == .process ? pid == nil : name == "Unrecognised"
+    }
 
     private var subtitle: String {
         let connections = pluralised(connectionCount, "connection")
+        guard grouping == .process else {
+            // Being unrecognised is the ordinary case for most of the internet, so it is
+            // stated plainly rather than dressed up as a finding.
+            return name == "Unrecognised"
+                ? "\(connections) to hosts no tracker database lists"
+                : connections
+        }
         guard let pid else { return "\(connections) with no identifiable owner" }
         // String(pid) rather than interpolating the number directly: SwiftUI applies
         // locale grouping to interpolated integers, which turned pid 1365 into "1,365".
@@ -118,14 +172,20 @@ private struct ProcessRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(nsImage: ProcessIcons.icon(forPid: pid))
-                .resizable()
-                .frame(width: 20, height: 20)
+            if grouping == .process {
+                Image(nsImage: ProcessIcons.icon(forPid: pid))
+                    .resizable()
+                    .frame(width: 20, height: 20)
+            } else {
+                Image(systemName: name == "Unrecognised" ? "questionmark.circle" : "building.2")
+                    .frame(width: 20, height: 20)
+                    .foregroundStyle(.secondary)
+            }
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(name)
                     .fontWeight(.medium)
-                    .foregroundStyle(pid == nil ? .secondary : .primary)
+                    .foregroundStyle(isPlaceholder ? .secondary : .primary)
                 Text(subtitle)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -177,12 +237,15 @@ private struct FlowRow: View {
                 }
                 // String(port) for the same reason as the pid: a port number is an
                 // identifier, and "port 8,080" is nonsense.
-                Text(
-                    "port \(String(flow.remotePort))"
-                        + (flow.tcpState.map { " · \($0)" } ?? "")
-                )
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                HStack(spacing: 5) {
+                    Text(
+                        "port \(String(flow.remotePort))"
+                            + (flow.tcpState.map { " · \($0)" } ?? "")
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    ClassificationBadges(classification: flow.classification)
+                }
             }
 
             Spacer()

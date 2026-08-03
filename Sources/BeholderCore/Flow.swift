@@ -130,6 +130,10 @@ public struct Flow: Sendable {
     /// is installed, or when the address is not one it can place.
     public var location: GeoLocation?
 
+    /// Who operates the far end, and what its name suggests it is for. Requires a
+    /// hostname, so this stays nil for flows that were never named.
+    public var classification: HostClassification?
+
     /// Whether this machine opened the connection, rather than accepting one.
     ///
     /// Nil only before the first packet is recorded. Determining it from port numbers
