@@ -349,6 +349,54 @@ struct FlowTableTests {
         #expect(table.activeFlows()[0].owner == firefox)
     }
 
+    /// Regression: `applyNames` stamped every name as `.dns` whatever its origin, so
+    /// reverse-lookup results were invisible in the statistics — a live run reported
+    /// "0 from reverse lookup" while reverse lookups were in fact succeeding. Worse, it
+    /// presented a PTR guess with the same confidence as an observed DNS answer.
+    @Test("A name keeps the provenance it was resolved with")
+    func namesKeepTheirSource() throws {
+        let table = FlowTable()
+        table.record(
+            packet(from: laptop, port: 51234, to: server, port: 443),
+            interfaceName: "utun8", localAddresses: localAddresses
+        )
+
+        table.applyNames { _ in (name: "host.example.net", source: .reverseLookup) }
+        let flow = try #require(table.activeFlows().first)
+        #expect(flow.hostName == "host.example.net")
+        #expect(flow.hostNameSource == .reverseLookup)
+    }
+
+    @Test("Better evidence replaces weaker, and weaker never replaces better")
+    func evidenceRanking() throws {
+        let table = FlowTable()
+        table.record(
+            packet(from: laptop, port: 51234, to: server, port: 443),
+            interfaceName: "utun8", localAddresses: localAddresses
+        )
+
+        table.applyNames { _ in (name: "ptr.example.net", source: .reverseLookup) }
+        #expect(try #require(table.activeFlows().first).hostNameSource == .reverseLookup)
+
+        // DNS outranks a PTR record.
+        table.applyNames { _ in (name: "dns.example.com", source: .dns) }
+        var flow = try #require(table.activeFlows().first)
+        #expect(flow.hostName == "dns.example.com")
+        #expect(flow.hostNameSource == .dns)
+
+        // SNI is proof for this connection and outranks DNS.
+        table.setServerName("sni.example.com", for: flow.key)
+        flow = try #require(table.activeFlows().first)
+        #expect(flow.hostNameSource == .serverNameIndication)
+
+        // Nothing weaker may overwrite it.
+        table.applyNames { _ in (name: "ptr.example.net", source: .reverseLookup) }
+        table.applyNames { _ in (name: "dns.example.com", source: .dns) }
+        flow = try #require(table.activeFlows().first)
+        #expect(flow.hostName == "sni.example.com")
+        #expect(flow.hostNameSource == .serverNameIndication)
+    }
+
     @Test("Unresolvable flows stay listed as unknown rather than vanishing")
     func unattributedFlowsSurvive() {
         let table = FlowTable()

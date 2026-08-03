@@ -121,8 +121,16 @@ public final class NameResolutionCache {
     }
 
     public func name(for address: IPAddress, at now: Date = Date()) -> String? {
+        resolved(for: address, at: now)?.name
+    }
+
+    /// The name and the evidence behind it, so callers can record provenance rather than
+    /// assuming it.
+    public func resolved(
+        for address: IPAddress, at now: Date = Date()
+    ) -> (name: String, source: NameSource)? {
         guard let entry = entries[address], entry.expiresAt > now else { return nil }
-        return entry.name
+        return (entry.name, entry.source)
     }
 
     @discardableResult

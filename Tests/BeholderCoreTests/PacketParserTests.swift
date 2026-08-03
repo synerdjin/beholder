@@ -294,6 +294,11 @@ struct IPAddressTests {
             ([127, 0, 0, 1], false, "loopback"),
             ([169, 254, 1, 1], false, "link-local"),
             ([224, 0, 0, 251], false, "multicast"),
+            // RFC 6598 shared address space: carrier NAT, and this machine's VPN resolver.
+            ([100, 64, 0, 2], false, "CGNAT 100.64/10"),
+            ([100, 127, 255, 255], false, "CGNAT upper bound"),
+            ([100, 128, 0, 1], true, "100.128 is public, just outside 100.64/10"),
+            ([100, 63, 255, 255], true, "100.63 is public, just below 100.64/10"),
             ([93, 184, 216, 34], true, "public"),
             ([8, 8, 8, 8], true, "public"),
         ]

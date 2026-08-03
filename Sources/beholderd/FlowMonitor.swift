@@ -102,7 +102,7 @@ final class FlowMonitor: @unchecked Sendable {
             // A DNS answer usually arrives just before the connection it enables, so
             // pushing names out immediately is what makes the very first flow to a host
             // show a name rather than an address.
-            table.applyNames { self.names.name(for: $0) }
+            table.applyNames { self.names.resolved(for: $0) }
         }
     }
 
@@ -143,7 +143,7 @@ final class FlowMonitor: @unchecked Sendable {
                     expiresAt: Date().addingTimeInterval(86400),
                     source: .reverseLookup
                 )
-                self.table.applyNames { self.names.name(for: $0) }
+                self.table.applyNames { self.names.resolved(for: $0) }
             }
         }
         reverseResolver = resolver
@@ -244,7 +244,7 @@ final class FlowMonitor: @unchecked Sendable {
             resolve(key, in: snapshot).map { (owner: $0.owner, tcpState: $0.tcpState) }
         }
         table.refreshState { key in resolve(key, in: snapshot)?.tcpState }
-        table.applyNames { self.names.name(for: $0, at: now) }
+        table.applyNames { self.names.resolved(for: $0, at: now) }
         if let geography {
             table.applyLocations { geography.location(for: $0) }
         }

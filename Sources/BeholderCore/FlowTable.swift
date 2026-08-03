@@ -102,15 +102,22 @@ public final class FlowTable {
         flows[key]?.hostNameSource = .serverNameIndication
     }
 
-    /// Fills in hostnames from the DNS cache for flows that do not already have better
-    /// evidence. Applied to every flow each pass, because a DNS answer often arrives
-    /// after the connection it was looking up has already started.
-    public func applyNames(_ lookup: (IPAddress) -> String?) {
-        for (key, flow) in flows where flow.hostNameSource != .serverNameIndication {
-            if let name = lookup(flow.key.remote) {
-                flows[key]?.hostName = name
-                flows[key]?.hostNameSource = .dns
-            }
+    /// Fills in hostnames for flows that do not already have better evidence. Applied to
+    /// every flow each pass, because a DNS answer often arrives after the connection it
+    /// was looking up has already started.
+    ///
+    /// The lookup returns the source alongside the name. An earlier version stamped every
+    /// name as `.dns` regardless of where it came from, which made reverse-lookup results
+    /// invisible in the statistics and, worse, presented a PTR guess with the same
+    /// confidence as an observed DNS answer.
+    public func applyNames(_ lookup: (IPAddress) -> (name: String, source: NameSource)?) {
+        for (key, flow) in flows {
+            guard let resolved = lookup(flow.key.remote) else { continue }
+            // Never downgrade: a name read from this connection's own handshake outranks
+            // anything inferred from an address.
+            if let existing = flow.hostNameSource, existing >= resolved.source { continue }
+            flows[key]?.hostName = resolved.name
+            flows[key]?.hostNameSource = resolved.source
         }
     }
 

@@ -146,6 +146,10 @@ public struct IPAddress: Hashable, Sendable, CustomStringConvertible {
             if value >> 24 == 10 { return true }                    // 10/8
             if value >> 20 == 0xAC1 { return true }                 // 172.16/12
             if value >> 16 == 0xC0A8 { return true }                // 192.168/16
+            // 100.64/10, RFC 6598 shared address space. Carrier NAT uses it, and so does
+            // this machine's VPN for its internal resolver. It is not routable on the
+            // public internet, so geolocating or reverse-resolving it is wasted work.
+            if value >> 22 == 0x191 { return true }
             return false
         case .v6:
             return high >> 57 == 0x7E                               // fc00::/7
