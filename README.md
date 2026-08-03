@@ -126,11 +126,13 @@ put, not a hint.
 - [x] Caveats surfaced in the UI rather than buried
 
 ```bash
-./beholder
+make run
 ```
 
 That builds both halves, asks for your password once, starts the daemon and opens the
-app. Ctrl-C stops the daemon and quits the app.
+app. Ctrl-C stops the daemon and quits the app. `make help` lists everything else —
+`make top` for the terminal view, `make sockets` and `make selftest` for the parts that
+need no root, `make report` to print the last run's summary.
 
 It stays two processes on purpose. Capture reads `/dev/bpf*` and needs root; a GUI must
 not run as root, or it owns windows as root and writes root-owned preferences into your

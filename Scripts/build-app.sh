@@ -64,6 +64,8 @@ codesign --force --sign - "${APP}" 2>/dev/null || echo "note: ad-hoc signing ski
 echo
 echo "Built ${APP}"
 echo
-echo "Run the daemon first (it needs root), then open the app:"
-echo "  sudo ${ROOT}/.build/${CONFIGURATION}/beholderd --serve --loopback"
-echo "  open ${APP}"
+echo "The app needs a capture daemon to read. Start both with:"
+echo "  make run"
+echo
+echo "Or, against a daemon you are already running:"
+echo "  make open-app"

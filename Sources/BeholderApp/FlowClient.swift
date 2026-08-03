@@ -63,9 +63,9 @@ final class FlowClient {
             let descriptor = Self.connect(to: path)
 
             guard descriptor >= 0 else {
-                state = .waitingForDaemon(
-                    "No daemon on \(path). Start it with:  sudo ./.build/debug/beholderd --serve"
-                )
+                // Just the situation. What to do about it is the view's business, and
+                // saying it in both places guarantees the two drift apart.
+                state = .waitingForDaemon("Nothing is listening on \(path).")
                 try? await Task.sleep(for: .seconds(2))
                 continue
             }
@@ -75,7 +75,7 @@ final class FlowClient {
             close(descriptor)
 
             guard !Task.isCancelled else { return }
-            state = .waitingForDaemon("Daemon stopped. Waiting for it to come back…")
+            state = .waitingForDaemon("The capture daemon stopped.")
             try? await Task.sleep(for: .seconds(2))
         }
     }

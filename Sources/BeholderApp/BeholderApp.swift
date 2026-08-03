@@ -147,37 +147,88 @@ private struct MainView: View {
     }
 }
 
+/// Shown whenever there is no daemon to read.
+///
+/// Capture needs root and is started separately, so an idle app is the ordinary state on
+/// launch rather than a fault. The screen therefore explains rather than apologises, and
+/// gives exactly one command to run — an earlier version stated the problem twice and
+/// offered two subtly different commands, which is worse than saying nothing.
 private struct WaitingView: View {
     let state: FlowClient.State
 
+    /// The app bundle lives at `<project>/.build/Beholder.app`, so the project root is
+    /// two levels up. Showing the real path means the command can be pasted as-is
+    /// instead of being adjusted for wherever the user happens to be.
+    private var projectRoot: String? {
+        let root = Bundle.main.bundleURL
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let makefile = root.appendingPathComponent("Makefile")
+        return FileManager.default.fileExists(atPath: makefile.path) ? root.path : nil
+    }
+
+    private var command: String {
+        guard let projectRoot else { return "make run" }
+        return "cd \(projectRoot) && make run"
+    }
+
     var body: some View {
-        VStack(spacing: 14) {
+        VStack(spacing: 16) {
             Image(systemName: "eye.slash")
                 .font(.system(size: 42))
                 .foregroundStyle(.secondary)
 
             switch state {
-            case .waitingForDaemon(let message), .failed(let message):
+            case .failed(let message):
                 Text(message)
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
+            case .waitingForDaemon(let message):
+                VStack(spacing: 6) {
+                    Text("The capture daemon isn't running")
+                        .font(.headline)
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
             default:
                 ProgressView()
-                Text("Connecting to the capture daemon…")
+                Text("Connecting to the capture daemon")
                     .foregroundStyle(.secondary)
             }
 
-            // Capture needs root and is started by hand, so an idle app is the expected
-            // state on launch, not a fault. Say what to do about it.
-            Text("Capture requires root, so the daemon is started separately:")
+            if case .failed = state {} else {
+                Text(
+                    "Capture reads /dev/bpf*, which is root-only, so it runs as a "
+                        + "separate process. Start it with:"
+                )
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Text("sudo ./.build/debug/beholderd --serve --loopback")
-                .font(.system(.caption, design: .monospaced))
-                .textSelection(.enabled)
-                .padding(8)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 420)
+
+                HStack(spacing: 8) {
+                    Text(command)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(command, forType: .string)
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Copy the command")
+                }
+                .padding(10)
                 .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+
+                Text("This window connects on its own once the daemon is up.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(40)
