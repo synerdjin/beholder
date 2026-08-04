@@ -38,15 +38,21 @@ public struct ProcessTotal: Sendable, Equatable {
 
 extension FlowStore {
 
-    /// Flows active within a window, heaviest first.
+    /// Flows active within a window, heaviest first by default.
     ///
     /// `matching` filters on process name, hostname, address, company or network — the
     /// same fields the live view searches, so a query learned in one place works in the
     /// other.
+    ///
+    /// `order` exists because the default is wrong for one common question. "What was this
+    /// laptop doing overnight" is an eight-hour window, and ranked by volume a 200-byte
+    /// beacon at 03:14 sits behind every video segment of the evening — the interesting
+    /// row is the one that never appears. `.recent` puts the clock back in charge.
     public func flows(
         since: Date,
         until: Date = Date(),
         matching: String? = nil,
+        order: HistoryOrder = .bytes,
         limit: Int = 500
     ) throws -> [HistoricalFlow] {
         var sql = """
@@ -67,7 +73,10 @@ extension FlowStore {
                  )
                 """
         }
-        sql += " ORDER BY (bytes_out + bytes_in) DESC LIMIT ?;"
+        switch order {
+        case .bytes: sql += " ORDER BY (bytes_out + bytes_in) DESC LIMIT ?;"
+        case .recent: sql += " ORDER BY last_seen DESC LIMIT ?;"
+        }
 
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(rawHandle, sql, -1, &statement, nil) == SQLITE_OK else {
@@ -168,8 +177,6 @@ extension FlowStore {
         )
     }
 
-    private func text(_ statement: OpaquePointer?, _ column: Int32) -> String? {
-        guard let pointer = sqlite3_column_text(statement, column) else { return nil }
-        return String(cString: pointer)
-    }
+    // `text`, `unsigned` and the binding helpers live in FlowStoreDigests, which needs the
+    // same plumbing. One copy, since the two files are extensions on the same type.
 }

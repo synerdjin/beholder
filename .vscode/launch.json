@@ -39,6 +39,26 @@
             "target": "BeholderApp",
             "configuration": "release",
             "preLaunchTask": "swift: Build Release BeholderApp"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:beholder}",
+            "name": "Debug BeholderMCP",
+            "target": "BeholderMCP",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug BeholderMCP"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:beholder}",
+            "name": "Release BeholderMCP",
+            "target": "BeholderMCP",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release BeholderMCP"
         }
     ]
 }

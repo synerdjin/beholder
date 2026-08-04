@@ -287,8 +287,28 @@ Beholder sees everything this machine does, so it is deliberately conservative:
 - Metadata only. Packet payloads are never stored; the 512-byte snaplen exists to read
   headers, DNS answers and TLS SNI, and bulk payload stays in the kernel.
 - Promiscuous mode is off. Beholder watches this host, not the local network.
-- No telemetry. The only outbound request it ever makes is an explicit, user-initiated
-  GeoIP database download.
+- No telemetry. Beholder never contacts anything on its own. Two things can send data off
+  this machine, both explicit and both started by you: downloading the GeoIP and tracker
+  databases, and the MCP server.
+
+The MCP server is the one worth stating plainly rather than leaving to be inferred. When
+you register it and an assistant calls one of its tools, what it read goes to Anthropic:
+**hostnames, process names, IP addresses, byte counts, timestamps, and the country,
+network and company behind each address** — the contents of this database, unredacted, for
+whatever window was asked about. That is the entire point of the thing. There is no way to
+answer "what did Slack talk to overnight" without the answer leaving the machine.
+
+A redacting mode was considered and dropped. Pseudonymised hostnames make the answers
+worthless — "host-4f2a used 2 GB" answers nothing anyone asked — and a half-private mode
+is worse than none, because it invites you to believe less left the machine than did. So
+it is full fidelity, off until registered, and written down here instead of buried.
+
+Hostnames arrive from the network, which means anyone who can make this machine resolve a
+name chooses a string that ends up in an assistant's context. They are sent as delimited
+data rather than prose, truncated to the length a real name can be, and stripped of
+control characters. They are deliberately **not** filtered on content: a keyword blocklist
+would hide the interesting hostname, and a network-visibility tool that quietly omits the
+suspicious host has defeated its own purpose.
 
 ## Known limitations
 
@@ -302,7 +322,10 @@ Beholder sees everything this machine does, so it is deliberately conservative:
 - A transparent proxy — NordVPN's Threat Protection is one — re-originates connections
   from its own socket, so the originating application is not on the wire to be found.
   Beholder says so rather than presenting the proxy as the culprit, but it cannot recover
-  the link.
+  the link. The historical view carries a coarser version of that caveat than the live one:
+  the warning is computed over live flows and the `flows` table has no column to record it,
+  so it is re-derived from the same thresholds at query time and names the process rather
+  than the individual connections it affected.
 - ICMP has no ports and therefore no socket, so it is never attributed to a process and is
   counted separately rather than inflating the unattributed figure.
 - Unsigned, so installing the daemon needs a `sudo` script rather than `SMAppService`, and
@@ -398,6 +421,46 @@ mode 0600, owned by you rather than root — it records every host this machine 
 
 Every report states the window it actually covers, because an empty result is otherwise
 ambiguous between "nothing happened" and "nothing was watching".
+
+## Asking it questions
+
+The history database answers questions the History tab cannot phrase. Beholder ships an
+MCP server so an assistant can read it on your behalf — "what did Slack talk to
+overnight", "have I ever contacted this address", "what was the biggest thing this laptop
+downloaded this week".
+
+```bash
+make mcp
+make mcp-add     # prints the claude mcp add line; run it yourself
+```
+
+It is off until you register it, and `claude mcp remove beholder` ends it.
+
+Four tools: recorded history, one endpoint's whole story, a live snapshot, and a health
+check. Four rather than a dozen on purpose — every tool's description sits in the
+assistant's context on every turn of every conversation, including the ones that have
+nothing to do with networking, so the set is a budget rather than a catalogue.
+
+Answers are grouped, not dumped. Two days of capture here is 24,000 connection rows across
+480 hostnames — about thirty rows for every host-and-application pair, and over a thousand
+for one busy API endpoint. Handing those to a reader to add up is both expensive and
+unreliable when the answer wanted was one number, so the grouping happens in SQLite and
+the summary is what travels.
+
+It is read-only by construction: the database is opened `SQLITE_OPEN_READONLY`, no tool
+takes a path or a SQL string, not one byte is written to the daemon's socket, and no
+subprocess is ever spawned. There is no SQL passthrough tool and there will not be one —
+read-only SQL still reaches other files through `ATTACH`, still returns unbounded results,
+and turns a fixed set of questions into an injection surface fed by generated text.
+
+**Do not run it under `sudo`.** It would resolve paths under root's home rather than
+yours, find an empty database, and hand an assistant's tool calls a root process for
+nothing. It says so on stderr if you do.
+
+The socket is mode 0600 and owned by whoever started capture. If that was a different
+account the server gets `EACCES`, and `beholder_status` reports it as that — naming the
+uid that owns the socket — rather than as a daemon that is not running, because those two
+have entirely different fixes.
 
 ## Capturing continuously
 

@@ -28,9 +28,9 @@ final class FlowClient {
     private(set) var history: [ThroughputSample] = []
     private static let historyLimit = 300
 
-    /// Generous next to a real snapshot — a busy machine's runs to a few hundred kilobytes
-    /// — and small enough that a stream which never completes one is caught in seconds.
-    private static let maximumMessageBytes = 8 * 1024 * 1024
+    /// Shared with `SnapshotClient` so the streaming reader and the one-shot reader cannot
+    /// disagree about how much unframed output is too much.
+    private static let maximumMessageBytes = SnapshotClient.maximumMessageBytes
 
     private let path: String
     private var readerTask: Task<Void, Never>?
@@ -64,12 +64,22 @@ final class FlowClient {
     private func runForever() async {
         while !Task.isCancelled {
             state = .connecting
-            let descriptor = Self.connect(to: path)
 
-            guard descriptor >= 0 else {
+            let descriptor: Int32
+            do {
+                descriptor = try SnapshotClient.connect(to: path)
+            } catch {
                 // Just the situation. What to do about it is the view's business, and
                 // saying it in both places guarantees the two drift apart.
-                state = .waitingForDaemon("Nothing is listening on \(path).")
+                //
+                // SnapshotClient tells the cases apart, so this now distinguishes a daemon
+                // that is not running from a socket owned by another user — which used to
+                // both read as "nothing is listening" and sent people looking in the wrong
+                // place.
+                state = .waitingForDaemon(
+                    (error as? SnapshotClient.Failure)?.description
+                        ?? "Nothing is listening on \(path)."
+                )
                 try? await Task.sleep(for: .seconds(2))
                 continue
             }
@@ -180,30 +190,4 @@ final class FlowClient {
         }
     }
 
-    /// Opens a Unix domain socket. Returns -1 if the daemon is not listening.
-    private nonisolated static func connect(to path: String) -> Int32 {
-        let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard descriptor >= 0 else { return -1 }
-
-        var address = sockaddr_un()
-        address.sun_family = sa_family_t(AF_UNIX)
-        let pathBytes = Array(path.utf8)
-        guard pathBytes.count < MemoryLayout.size(ofValue: address.sun_path) else {
-            close(descriptor)
-            return -1
-        }
-        withUnsafeMutableBytes(of: &address.sun_path) { $0.copyBytes(from: pathBytes) }
-        address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
-
-        let result = withUnsafePointer(to: &address) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                Darwin.connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
-            }
-        }
-        guard result == 0 else {
-            close(descriptor)
-            return -1
-        }
-        return descriptor
-    }
 }
