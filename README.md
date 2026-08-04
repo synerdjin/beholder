@@ -5,6 +5,15 @@ whom, where in the world that is, and how much data is moving.
 
 Inspired by Little Snitch's Network Monitor. **Beholder observes; it does not block.**
 
+```bash
+git clone https://github.com/synerdjin/beholder.git && cd beholder
+make run          # builds both halves, asks for your password once, opens the app
+```
+
+Requires macOS 14+ and Xcode's Swift toolchain. Nothing else — no Apple Developer account,
+no third-party packages. `make help` lists every target; `make check` builds, runs the 101
+tests and exercises the daemon's socket without needing root.
+
 ## Why not just do what Little Snitch does?
 
 Little Snitch uses a Network System Extension built on `NEFilterDataProvider`. That
@@ -24,16 +33,23 @@ connections, and attribution of very short-lived connections is best-effort.
 ## Architecture
 
 ```
-beholderd (root, launchd)                Beholder.app (user, SwiftUI)
-  CaptureEngine   libpcap        ──XPC──▶  live connection list
-  Attributor      libproc                  world map / throughput charts
-  FlowTable       aggregation              history browser
+beholderd (root, launchd)                    Beholder.app (user, SwiftUI)
+  CaptureEngine   libpcap        ──socket──▶   live connection list
+  Attributor      libproc          JSON        world map / throughput charts
+  FlowTable       aggregation                  history browser
   Enricher        DNS, TLS SNI, GeoIP
   FlowStore       SQLite
 ```
 
 The daemon holds all privilege and all state; the app is a pure view that can be closed or
 crash without interrupting capture.
+
+The link between them is a Unix domain socket carrying newline-delimited JSON, one
+snapshot per second, mode 0600 and owned by the user who started it. Not XPC: that wants a
+`MachServices` entry and, to validate the peer on the other end, a signing identity this
+project does not have. The daemon is therefore strictly read-only over the socket — it
+exposes no command that changes state, so an unauthenticated reader can learn only what
+`lsof` would already tell it, whereas an unauthenticated *writer* would be a real hole.
 
 ## Following the VPN
 
@@ -48,6 +64,19 @@ answer `route -n get default` gives — and re-opens the capture when the route 
 `utun` interfaces are also `DLT_NULL` (a 4-byte address-family word), not Ethernet.
 Beholder resolves the link type per capture handle and refuses interfaces whose link type
 it does not recognise, rather than guessing and misparsing everything.
+
+Verified on a live connect / drop / reconnect cycle:
+
+```
+11:24:08  capture moved en0 → utun8      VPN connected
+11:24:46  capture moved utun8 → en0      VPN dropped
+11:25:46  capture moved en0 → utun8      VPN reconnected
+```
+
+Checked afterwards against the history database for gaps in new-flow arrival across the
+whole window: **no gap longer than three seconds**. Capture followed the route each time
+and kept counting, with no crash and no permanent blind spot. Note the direction — a
+`utun8 → en0` line is the VPN going *down*, which is easy to read backwards.
 
 ## Status
 
@@ -106,6 +135,27 @@ Neither source can see through Encrypted Client Hello or DNS-over-HTTPS, and nei
 see past iCloud Private Relay, which is labelled explicitly rather than shown as an
 unexplained Apple address.
 
+#### Private Relay does not simply switch off under a VPN
+
+Apple disables Private Relay while a VPN is active, so relay connections appearing with a
+VPN up look like a bug. They are not, and the distinction is between two different kinds
+of host. From one machine's record across a VPN connect/disconnect cycle:
+
+| | interface | when |
+|---|---|---|
+| **egress** (`apple-relay.cloudflare.com`) — traffic genuinely being relayed | en0 only | VPN down |
+| **ingress / encrypted DNS** (`mask.*`) | en0 **and** utun8 | throughout |
+
+The egress hosts — the second hop, where a destination really is hidden from this machine
+— appear only while the VPN is down and stop entirely once it comes up. What continues is
+almost all `mDNSResponder` talking to `mask.icloud.com:443`: macOS resolving names
+privately, which runs over Private Relay infrastructure but is not browsing being relayed.
+Apple *is* the destination there, and nothing is forwarded onward.
+
+Beholder therefore says these connections' contents are encrypted and unreadable from
+here, which is true of both, rather than claiming a hidden third-party destination that
+for most of them does not exist.
+
 **Phase 3b — capture follows the route. Done.**
 
 Capture used to resolve the default route once at startup. Connect a VPN and the route
@@ -133,6 +183,25 @@ That builds both halves, asks for your password once, starts the daemon and open
 app. Ctrl-C stops the daemon and quits the app. `make help` lists everything else —
 `make top` for the terminal view, `make sockets` and `make selftest` for the parts that
 need no root, `make report` to print the last run's summary.
+
+#### The socket contract
+
+Two bugs in the publishing socket were subtle enough to be worth recording, because both
+presented as something other than what they were, and `make check` now guards each.
+
+**Snapshots must arrive whole.** Client sockets are non-blocking, so a snapshot larger
+than the kernel send buffer takes several writes. Giving up when the buffer fills does not
+skip a snapshot — it destroys the framing. The terminating newline is never sent, the next
+snapshot is appended to a truncated one, and the reader can never resynchronise. The
+daemon looked healthy from outside while delivering 65,536 bytes containing zero complete
+messages, and the app showed an empty window. Messages are now queued per client and
+finished across writes, with at most one whole snapshot held behind the one in flight.
+
+**A reader leaving must not kill the daemon.** Writing to a socket whose peer has gone
+raises `SIGPIPE`, whose default disposition terminates the process — so quitting the app
+could stop capture. `SO_NOSIGPIPE` per socket is not enough: `setsockopt` returns `EINVAL`
+when the peer closed before the connection was accepted, leaving the option unset on
+exactly the socket that needed it. The signal is ignored process-wide instead.
 
 It stays two processes on purpose. Capture reads `/dev/bpf*` and needs root; a GUI must
 not run as root, or it owns windows as root and writes root-owned preferences into your
@@ -230,6 +299,15 @@ Beholder sees everything this machine does, so it is deliberately conservative:
   entitlement described above.
 - Byte counts are wire bytes on the captured interface. Capturing the tunnel excludes VPN
   encapsulation overhead, so totals will differ slightly from what `en0` sees.
+- A transparent proxy — NordVPN's Threat Protection is one — re-originates connections
+  from its own socket, so the originating application is not on the wire to be found.
+  Beholder says so rather than presenting the proxy as the culprit, but it cannot recover
+  the link.
+- ICMP has no ports and therefore no socket, so it is never attributed to a process and is
+  counted separately rather than inflating the unattributed figure.
+- Unsigned, so installing the daemon needs a `sudo` script rather than `SMAppService`, and
+  macOS may require a one-time approval in Login Items & Extensions. A Developer ID would
+  remove both.
 
 ## Geolocation
 
@@ -366,3 +444,18 @@ uninstall script should make for you.
 
 With a Developer ID this would be `SMAppService` instead, letting the app install and
 remove the daemon itself with a proper entry in System Settings.
+
+## Licence
+
+Beholder is MIT licensed — see [LICENSE](LICENSE).
+
+That covers the code in this repository. The two optional databases are **fetched at
+runtime and never redistributed here**, and keep their own terms:
+
+| Data | Licence | Fetched by |
+|---|---|---|
+| DB-IP City Lite / ASN Lite | CC BY 4.0 | `make geoip` |
+| DuckDuckGo Tracker Radar | CC BY-NC-SA 4.0 — **NonCommercial**, ShareAlike | `make trackers` |
+
+The tracker index being NonCommercial is why it is downloaded rather than committed:
+personal use is fine, commercial use needs permission from DuckDuckGo.
