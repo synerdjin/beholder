@@ -32,6 +32,10 @@ app: ## Build the app bundle
 test: ## Run the test suite
 	swift test
 
+.PHONY: test-server
+test-server: ## Check that a departing reader cannot kill the daemon (needs no root)
+	./Scripts/test-server-resilience.sh
+
 .PHONY: check
 check: ## Build and test, failing on any warning
 	@swift build --configuration $(CONFIG) 2>&1 | tee /tmp/beholder-build.log
@@ -39,6 +43,7 @@ check: ## Build and test, failing on any warning
 		echo "Build produced warnings."; exit 1; \
 	fi
 	@swift test
+	@./Scripts/test-server-resilience.sh
 
 # ------------------------------------------------------------------------- running
 

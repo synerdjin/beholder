@@ -166,6 +166,10 @@ final class FlowServer: @unchecked Sendable {
 
         // Never let a stalled reader block the daemon: a client that cannot keep up is
         // dropped rather than allowed to apply back-pressure to capture.
+        // Best-effort only, and deliberately not load-bearing: setsockopt returns EINVAL
+        // when the peer has already closed by the time we accept, which is exactly the
+        // case SO_NOSIGPIPE exists to handle. The process-wide SIGPIPE disposition set in
+        // Beholderd.main() is what actually keeps a write to a departed reader survivable.
         var enabled: Int32 = 1
         setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &enabled, socklen_t(MemoryLayout<Int32>.size))
         _ = fcntl(client, F_SETFL, fcntl(client, F_GETFL, 0) | O_NONBLOCK)

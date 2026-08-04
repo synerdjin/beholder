@@ -35,6 +35,18 @@ enum Beholderd {
         // the process exited — leaving a crash-looping daemon with two empty log files
         // and nothing whatsoever to diagnose from.
         setvbuf(stdout, nil, _IOLBF, 0)
+
+        // A reader going away must never take the daemon with it.
+        //
+        // Writing to a socket whose peer has closed raises SIGPIPE, and the default
+        // disposition is to terminate — so quitting the app could kill capture. The
+        // per-socket SO_NOSIGPIPE set on each client is not a sufficient guard: when the
+        // peer closes before the connection is accepted, setsockopt itself fails with
+        // EINVAL, leaving the option unset on precisely the socket that needs it. Ignoring
+        // the signal process-wide turns every such write into an EPIPE return value, which
+        // the send path already handles by dropping the client.
+        signal(SIGPIPE, SIG_IGN)
+
         note("starting: \(CommandLine.arguments.joined(separator: " "))")
 
         guard let options = Options.parse(Array(CommandLine.arguments.dropFirst())) else {

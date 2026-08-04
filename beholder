@@ -93,4 +93,25 @@ open "${APP}"
 
 echo
 echo "Beholder is running. Press Ctrl-C to stop the daemon and quit the app."
-wait "${DAEMON_PID}"
+
+# Reaching past this `wait` means the daemon ended without being asked to — Ctrl-C never
+# gets here, because the INT trap exits first. Reporting that as the same bare "Stopped."
+# a deliberate quit produces is how a crash once looked like a normal exit, with only
+# make's "Error 141" to suggest otherwise. Say plainly which it was.
+DAEMON_STATUS=0
+wait "${DAEMON_PID}" || DAEMON_STATUS=$?
+DAEMON_PID=""
+
+if [[ "${DAEMON_STATUS}" -ne 0 ]]; then
+    echo >&2
+    if [[ "${DAEMON_STATUS}" -gt 128 ]]; then
+        SIGNAL_NUMBER="$((DAEMON_STATUS - 128))"
+        SIGNAL_NAME="$(kill -l "${SIGNAL_NUMBER}" 2>/dev/null || echo "${SIGNAL_NUMBER}")"
+        echo "The capture daemon was killed by SIG${SIGNAL_NAME}." >&2
+    else
+        echo "The capture daemon exited with status ${DAEMON_STATUS}." >&2
+    fi
+    echo "Capture stopped; the output above is from just before it went." >&2
+fi
+
+exit "${DAEMON_STATUS}"
