@@ -333,6 +333,20 @@ This is what makes history worth having. A database that only fills while you ar
 answers the same questions the live view already does; one that filled while you were not
 is what answers "what did this app do on Tuesday".
 
+### macOS will not run it until you approve it
+
+After installing, open **System Settings → General → Login Items & Extensions**, find
+Beholder, and turn it on. macOS gives no prompt for this.
+
+Since Ventura, macOS registers daemons from unidentified developers and then declines to
+start them until approved. The failure is silent and convincing: `launchctl` reports the
+job loaded and enabled, `runs` climbs steadily, and yet no process ever exists and both
+log files stay empty. `make doctor` recognises this shape and says so.
+
+This is a consequence of having no Developer ID. A signed daemon would appear under a
+real name; an unsigned one shows up as something opaque that a user has little reason to
+trust — which is precisely what the gate is for.
+
 It is a genuine change to your system, so it is a separate opt-in rather than something
 `make run` does quietly. It installs exactly two things — `/usr/local/libexec/beholderd`
 and `/Library/LaunchDaemons/com.beholder.daemon.plist` — plus any optional databases, and

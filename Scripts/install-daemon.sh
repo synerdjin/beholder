@@ -161,6 +161,18 @@ if launchctl print "system/${LABEL}" > /dev/null 2>&1; then
     echo
     echo "Open the app any time to watch: make open-app"
     echo "If it cannot see the daemon:     make doctor"
+    echo
+    echo "─────────────────────────────────────────────────────────────────────"
+    echo "ONE MORE STEP, and macOS will not prompt you for it:"
+    echo
+    echo "  System Settings → General → Login Items & Extensions"
+    echo "  find Beholder (it may show as an unidentified developer) and turn it on."
+    echo
+    echo "macOS registers daemons from unsigned developers but refuses to run them"
+    echo "until you approve them there. Until you do, launchd will report the job as"
+    echo "loaded and enabled while never actually starting it — no process, no logs."
+    echo "This step goes away with a Developer ID."
+    echo "─────────────────────────────────────────────────────────────────────"
 else
     echo "The daemon did not start. Check /var/log/beholderd.err." >&2
     exit 1

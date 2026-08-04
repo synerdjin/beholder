@@ -30,6 +30,13 @@ enum Beholderd {
     private nonisolated(unsafe) static var retained: [AnyObject] = []
 
     static func main() {
+        // Line-buffer stdout. Swift block-buffers it when it is a file rather than a
+        // terminal, so under launchd every status line sat in a buffer and was lost when
+        // the process exited — leaving a crash-looping daemon with two empty log files
+        // and nothing whatsoever to diagnose from.
+        setvbuf(stdout, nil, _IOLBF, 0)
+        note("starting: \(CommandLine.arguments.joined(separator: " "))")
+
         guard let options = Options.parse(Array(CommandLine.arguments.dropFirst())) else {
             print(Options.usage)
             exit(1)
@@ -81,10 +88,7 @@ enum Beholderd {
             }
 
             for statistics in engine.statistics() {
-                print(
-                    "Capturing \(statistics.interfaceName) — "
-                        + "link type \(statistics.linkLayer.name)"
-                )
+                note("capturing \(statistics.interfaceName) (\(statistics.linkLayer.name))")
             }
             print("")
 
@@ -113,13 +117,14 @@ enum Beholderd {
             if options.storeHistory, !options.selfTest {
                 switch monitor.openStore(at: options.historyPath ?? FlowStore.defaultPath()) {
                 case .success(let path):
-                    print("Recording history to \(path)")
+                    note("recording history to \(path)")
                 case .failure(let error):
                     FileHandle.standardError.write(
                         Data("beholderd: \(error); continuing without history.\n".utf8)
                     )
                 }
             }
+            note("starting the flow monitor")
             monitor.start()
 
             // Only supervise when Beholder chose the interface. An explicit interface
@@ -165,7 +170,7 @@ enum Beholderd {
                 }
                 do {
                     try server.start()
-                    print("Publishing on \(options.socketPath) — open Beholder.app to view")
+                    note("publishing on \(options.socketPath)")
                     retained.append(server)
                 } catch let error as FlowServer.ServerError {
                     // The terminal view still works, so this is a warning, not a failure.
@@ -199,6 +204,7 @@ enum Beholderd {
             retained.append(reporter)
         }
 
+        note("startup complete; entering the run loop")
         dispatchMain()
     }
 
@@ -246,6 +252,15 @@ enum Beholderd {
             return nil
         }
         return log
+    }
+
+    /// A startup breadcrumb on stderr, which is never buffered.
+    ///
+    /// Startup is where a daemon fails, and it is exactly where buffered output is most
+    /// likely to be lost. These cost nothing and turn "it exits immediately" into a line
+    /// naming the step it got to.
+    static func note(_ message: String) {
+        FileHandle.standardError.write(Data("beholderd: \(message)\n".utf8))
     }
 
     private static func fail(_ message: String) -> Never {
