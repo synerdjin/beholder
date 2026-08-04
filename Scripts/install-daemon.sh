@@ -163,15 +163,17 @@ if launchctl print "system/${LABEL}" > /dev/null 2>&1; then
     echo "If it cannot see the daemon:     make doctor"
     echo
     echo "─────────────────────────────────────────────────────────────────────"
-    echo "ONE MORE STEP, and macOS will not prompt you for it:"
+    echo "If nothing shows up, run 'make doctor' first — it will tell you which of"
+    echo "these two very similar-looking situations you are in:"
     echo
-    echo "  System Settings → General → Login Items & Extensions"
-    echo "  find Beholder (it may show as an unidentified developer) and turn it on."
+    echo "  the daemon is crash-looping, which System Settings cannot fix, or"
+    echo "  macOS is refusing to start it until you approve it, at"
+    echo "  System Settings → General → Login Items & Extensions."
     echo
-    echo "macOS registers daemons from unsigned developers but refuses to run them"
-    echo "until you approve them there. Until you do, launchd will report the job as"
-    echo "loaded and enabled while never actually starting it — no process, no logs."
-    echo "This step goes away with a Developer ID."
+    echo "The approval step exists because there is no Developer ID to sign with,"
+    echo "and macOS gives no prompt for it. But an unapproved daemon and a crashing"
+    echo "one look identical from outside — no process, no logs — so check rather"
+    echo "than guess."
     echo "─────────────────────────────────────────────────────────────────────"
 else
     echo "The daemon did not start. Check /var/log/beholderd.err." >&2

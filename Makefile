@@ -112,46 +112,9 @@ data: geoip trackers ## Download both optional databases
 
 .PHONY: doctor
 doctor: ## Diagnose why the app cannot see the daemon
-	@echo "Daemon process:"
-	@ps -Ao pid,lstart,command | grep -E "(libexec/)?beholderd --serve" | grep -v grep \
-		|| echo "  not running"
-	@echo
-	@echo "launchd job:"
-	@launchctl print system/com.beholder.daemon 2>/dev/null \
-		| grep -E "^\s*(state|pid|runs|last exit code) " || echo "  not installed"
-	@echo
-	@echo "Publishing socket:"
-	@if [ -S /var/run/beholder.sock ]; then \
-		ls -la /var/run/beholder.sock; \
-		if python3 -c "import socket,sys; s=socket.socket(socket.AF_UNIX); s.settimeout(2); s.connect('/var/run/beholder.sock')" 2>/dev/null; then \
-			echo "  accepting connections - healthy"; \
-		else \
-			echo "  PRESENT BUT REFUSING CONNECTIONS - stale socket, restart the daemon:"; \
-			echo "    sudo launchctl kickstart -k system/com.beholder.daemon"; \
-		fi; \
-	else \
-		echo "  no socket at /var/run/beholder.sock"; \
-	fi
-	@echo
-	@echo "Recent daemon output:"
-	@tail -5 /var/log/beholderd.log 2>/dev/null || echo "  (none)"
-	@tail -5 /var/log/beholderd.err 2>/dev/null
-	@echo
-	@if launchctl print system/com.beholder.daemon 2>/dev/null | grep -q "runs = "; then \
-		if ! pgrep -f "libexec/beholderd" >/dev/null 2>&1; then \
-			if [ ! -s /var/log/beholderd.log ] && [ ! -s /var/log/beholderd.err ]; then \
-				echo "The job is loaded but has never actually run: no process, and both"; \
-				echo "logs are empty. macOS registers daemons from unidentified developers"; \
-				echo "and refuses to start them until you approve them:"; \
-				echo; \
-				echo "  System Settings > General > Login Items & Extensions"; \
-				echo "  find Beholder and turn it on."; \
-				echo; \
-				echo "Opening that pane now..."; \
-				open "x-apple.systempreferences:com.apple.LoginItems-Settings.extension" 2>/dev/null || true; \
-			fi; \
-		fi; \
-	fi
+	@# The script's exit code says whether it found a fault, which is useful when
+	@# scripting it but only adds a bare "Error 1" under the diagnosis it just printed.
+	@./Scripts/doctor.sh || true
 
 .PHONY: restart
 restart: ## (root) Restart the installed daemon

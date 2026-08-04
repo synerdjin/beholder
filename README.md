@@ -333,19 +333,29 @@ This is what makes history worth having. A database that only fills while you ar
 answers the same questions the live view already does; one that filled while you were not
 is what answers "what did this app do on Tuesday".
 
-### macOS will not run it until you approve it
+### If the daemon does not appear to run
 
-After installing, open **System Settings → General → Login Items & Extensions**, find
-Beholder, and turn it on. macOS gives no prompt for this.
+Since Ventura, macOS registers daemons from unidentified developers and can decline to
+start them until approved, with no prompt. If that is what is happening, open **System
+Settings → General → Login Items & Extensions**, find Beholder, and turn it on. This is a
+consequence of having no Developer ID: a signed daemon would appear under a real name,
+while an unsigned one shows up as something opaque that a user has little reason to trust
+— which is precisely what the gate is for.
 
-Since Ventura, macOS registers daemons from unidentified developers and then declines to
-start them until approved. The failure is silent and convincing: `launchctl` reports the
-job loaded and enabled, `runs` climbs steadily, and yet no process ever exists and both
-log files stay empty. `make doctor` recognises this shape and says so.
+**Check before assuming that is the cause.** A daemon that crash-loops looks almost
+identical from the outside: no process, `runs` climbing steadily, and both log files
+empty — because a process killed by a signal never flushes buffered output, so one that
+dies during startup leaves nothing behind. The two are told apart by a single field:
 
-This is a consequence of having no Developer ID. A signed daemon would appear under a
-real name; an unsigned one shows up as something opaque that a user has little reason to
-trust — which is precisely what the gate is for.
+```
+launchctl print system/com.beholder.daemon | grep "last terminating signal"
+```
+
+If that field is set, the job has been running and dying, and no amount of approving it
+in System Settings will help. `make doctor` reads it and says which case you are in.
+
+This distinction is in the README because getting it wrong cost real time: a crash loop
+was read as approval-pending and left restarting four thousand times.
 
 It is a genuine change to your system, so it is a separate opt-in rather than something
 `make run` does quietly. It installs exactly two things — `/usr/local/libexec/beholderd`
