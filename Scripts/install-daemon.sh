@@ -116,8 +116,37 @@ chown root:wheel "${PLIST}"
 chmod 644 "${PLIST}"
 
 # Replace any previous instance rather than failing on a second install.
-launchctl bootout "system/${LABEL}" 2>/dev/null || true
-launchctl bootstrap system "${PLIST}"
+#
+# bootout returns before teardown finishes. Bootstrapping straight afterwards lands while
+# the old job is still registered and fails with "Bootstrap failed: 5: Input/output
+# error", which says nothing about the actual cause. So wait for the label to genuinely
+# disappear before installing over it.
+if launchctl print "system/${LABEL}" > /dev/null 2>&1; then
+    echo "Removing the previous instance..."
+    launchctl bootout "system/${LABEL}" 2>/dev/null || true
+    for _ in $(seq 1 50); do
+        launchctl print "system/${LABEL}" > /dev/null 2>&1 || break
+        sleep 0.2
+    done
+    if launchctl print "system/${LABEL}" > /dev/null 2>&1; then
+        echo "The previous daemon will not unload. Try again, or reboot." >&2
+        exit 1
+    fi
+fi
+
+# A socket left by a daemon that is gone would otherwise be inherited as a dead path.
+if [[ -S /var/run/beholder.sock ]]; then
+    rm -f /var/run/beholder.sock
+fi
+
+if ! launchctl bootstrap system "${PLIST}"; then
+    echo >&2
+    echo "launchctl could not load ${PLIST}." >&2
+    echo "If this says 'Input/output error', the label is still registered:" >&2
+    echo "  sudo launchctl bootout system/${LABEL}" >&2
+    echo "then run this again." >&2
+    exit 1
+fi
 launchctl enable "system/${LABEL}"
 
 sleep 1

@@ -21,7 +21,17 @@ if [[ "${EUID}" -ne 0 ]]; then
 fi
 
 echo "Stopping the daemon..."
-launchctl bootout "system/${LABEL}" 2>/dev/null || echo "  (was not running)"
+if launchctl print "system/${LABEL}" > /dev/null 2>&1; then
+    launchctl bootout "system/${LABEL}" 2>/dev/null || true
+    # bootout is asynchronous, so wait for the label to actually go before reporting
+    # success or removing the files it is still using.
+    for _ in $(seq 1 50); do
+        launchctl print "system/${LABEL}" > /dev/null 2>&1 || break
+        sleep 0.2
+    done
+else
+    echo "  (was not running)"
+fi
 
 for path in "${PLIST}" /usr/local/libexec/beholderd; do
     if [[ -e "${path}" ]]; then
