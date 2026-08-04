@@ -1,0 +1,165 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+Beholder is a macOS network traffic visualizer: which process is talking to whom, where in
+the world that is, and how much data is moving. It observes; it never blocks.
+
+## Commands
+
+```bash
+make check          # the gate: build (fails on ANY warning) + tests + both shell smoke tests
+make build          # daemon + app bundle
+swift test          # unit tests only
+make help           # all ~40 targets
+```
+
+Needing root (capture reads `/dev/bpf*`, mode 0600 root:wheel):
+
+```bash
+make run            # build both halves, start the daemon, open the app
+make serve          # capture and publish, drawing nothing
+make top            # live connection table in the terminal
+make stop
+```
+
+Needing no root — use these when iterating:
+
+```bash
+make selftest       # timers, rendering and shutdown with no capture
+make sockets        # socket-to-process table (compare against `lsof -nP -i TCP`)
+make route          # which interface currently carries the default route
+make history        # query the history database
+make doctor         # diagnose why the app cannot see the daemon
+```
+
+### Running a single test
+
+`--filter` matches Swift **type and function names**, not the `@Test("display name")`
+string. Filtering on the display name silently matches zero tests and still exits 0.
+
+```bash
+swift test --filter 'SnapshotClientTests/timesOutOnSilence'   # one test
+swift test --filter 'SnapshotClientTests'                     # one suite
+```
+
+### Optional databases
+
+`Resources/geoip/` and `Resources/trackers/` are gitignored and fetched at runtime
+(`make geoip`, `make trackers`, or `make data`). They are downloaded rather than committed
+for licence reasons — the DuckDuckGo tracker index is CC BY-NC-SA (NonCommercial). Tests
+that need them skip cleanly when absent; don't add them to the repo.
+
+## Architecture
+
+Five SwiftPM targets plus a test target. **There is no Xcode project and none is wanted** —
+`Scripts/build-app.sh` arranges an `Info.plist` around the SwiftPM binary to make
+`.build/Beholder.app`.
+
+| Target | Role |
+|---|---|
+| `CBeholderShim` | C shim re-exporting pcap, libproc, route and sqlite3 headers |
+| `BeholderCore` | All pure, testable logic. No privilege. |
+| `beholderd` | The root capture daemon |
+| `BeholderApp` | SwiftUI viewer, unprivileged |
+| `BeholderMCP` | MCP server, unprivileged, read-only |
+
+**The daemon holds all privilege and all state; every other binary is a reader.** The app
+and the MCP server can be closed, crash, or never run without interrupting capture.
+
+### Two independent channels out of the daemon
+
+1. **Live** — a Unix domain socket (`/var/run/beholder.sock`) carrying newline-delimited
+   JSON, one whole `FlowSnapshot` per second. Not XPC: that wants a `MachServices` entry
+   and a signing identity this project deliberately does without. The daemon is **strictly
+   read-only over the socket** — it accepts no command that changes state, so an
+   unauthenticated reader learns only what `lsof` would already tell them, whereas an
+   unauthenticated *writer* would be a real hole. Preserve that property.
+2. **Historical** — a SQLite database that readers open **read-only**, so it works when
+   nothing is capturing, which is exactly when you want to look at it.
+
+`WireProtocol.swift` is the contract for (1) and lives in Core precisely so the two ends
+cannot disagree about it. Bump `WireProtocol.version` on any incompatible change; both
+sides check it and fail with a clear message rather than decoding into nonsense.
+
+### Capture pipeline
+
+`CaptureEngine` (pcap, snaplen 1024, filter `ip or ip6`, promiscuous off) → `PacketParser`
+→ `FlowTable.record` → enrichment → published and persisted. `FlowMonitor` is the hub that
+orchestrates enrichment and is where most cross-cutting behaviour lives.
+
+Enrichment sources, each independent and each degrading gracefully when absent: `Attributor`
+(libproc socket table, adaptively polled), `PayloadInspector` (TLS SNI and DNS answers),
+`ReverseResolver`, `GeoIPDatabase`, `ASNDatabase`, `TrackerDatabase`, `ProxyDetection`.
+
+**Capture follows the default route.** With a VPN up the route moves to a `utun` and `en0`
+carries nothing but encrypted tunnel packets — capturing the wrong interface produces
+output that looks plausible and means nothing. `InterfaceSupervisor` re-opens capture on
+every transition. Naming interfaces explicitly disables following: that is read as an
+instruction to stay put, not a hint.
+
+### Concurrency
+
+- **`@main` on a type, never top-level code.** Top-level code in Swift 6 is
+  `@MainActor`-isolated, which makes any dispatch-queue callback touching top-level state
+  trap at runtime. Every executable here follows this.
+- **`FlowStore` and `FlowTable` are not thread-safe.** In the daemon they are confined to
+  `FlowMonitor.flowQueue`. Readers open their own short-lived instance instead of sharing one.
+- Objects owning dispatch sources must be retained for the process lifetime —
+  `dispatchMain()` never returns, so the compiler may otherwise release `main()`'s locals
+  and leave the process alive but silent.
+
+## Conventions that will trip you up
+
+**Zero third-party dependencies, and this is a hard value.** The `.mmdb` reader, the JSON
+value type, and the MCP JSON-RPC layer are all hand-written for this reason. Do not add a
+package to solve a problem of this size.
+
+**`make check` fails on any warning.** Not just errors.
+
+**Executable targets cannot be reached by unit tests**, so behaviour that only exists in a
+binary is covered by shell tests in `Scripts/` driven by `python3`
+(`test-publishing-socket.sh`, `test-mcp-stdio.sh`). Both are wired into `make check`. If
+you add logic to an executable, either move it into `BeholderCore` where a test can reach
+it, or extend the matching shell test.
+
+**Put contracts in `BeholderCore`, not in the executable.** The rule "no privilege, testable
+without root" is what Core is protecting — value types and pure functions belong there even
+when they describe I/O.
+
+**`BeholderPaths` resolves `SUDO_USER`.** Capture runs under `sudo` and must write to the
+invoking user's Application Support, never root's. A tool started via `su -` rather than
+`sudo` writes to `/var/root/…` and then looks empty from a normal shell — which is why
+diagnostics always print the path they checked.
+
+**`logs/` is personal data** — run transcripts list every host the machine contacted. It is
+gitignored, along with the databases. Never commit either.
+
+**The MCP server's stdout carries nothing but JSON-RPC.** There is no framing header to
+resynchronise from, so a single stray `print()` anywhere in its startup path corrupts the
+stream permanently and surfaces only as an unexplained client-side parse error. Use stderr
+for anything human-facing. This is also why it is a separate binary from the chatty `beholderd`.
+
+**There is no `query_sql` MCP tool and there should never be one.** Read-only SQLite still
+reaches other files via `ATTACH`, still returns unbounded results, and turns a fixed set of
+questions into an injection surface fed by generated text.
+
+## Writing style
+
+The README is the design document, not a quickstart, and it is unusually detailed on
+purpose. Comments and prose here explain **why** a decision was made — naming the
+alternative that was rejected and, where relevant, the bug that motivated it. Several
+comments exist specifically because getting something wrong once cost real time (the
+socket framing bug, the crash-loop-versus-pending-approval diagnosis, the mDNSResponder
+false positive in proxy detection). Match that register: when you fix something subtle,
+record why in the code or the README rather than only in a commit message.
+
+Two rules that recur throughout and are worth keeping:
+
+- **Every report states the window it actually covers**, because an empty result is
+  otherwise ambiguous between "nothing happened" and "nothing was watching".
+- **Caveats travel with the data.** A UI or an answer that shows totals without saying they
+  are an undercount is worse than one that shows nothing. Attribution can be defeated by a
+  transparent proxy, byte counts can be undercounts when packets drop, and DNS-derived
+  hostnames are a good guess where SNI is proof — all of these are surfaced rather than
+  smoothed over.

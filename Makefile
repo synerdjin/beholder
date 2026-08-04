@@ -44,6 +44,7 @@ check: ## Build and test, failing on any warning
 	fi
 	@swift test
 	@./Scripts/test-publishing-socket.sh
+	@./Scripts/test-mcp-stdio.sh
 
 # ------------------------------------------------------------------------- running
 
@@ -135,6 +136,45 @@ history-week: daemon-bin ## Show the last week
 .PHONY: history-csv
 history-csv: daemon-bin ## Export the last day as CSV
 	@$(DAEMON) --history --csv
+
+# ----------------------------------------------------------------- asking questions
+
+.PHONY: mcp
+mcp: ## Build the MCP server, so an assistant can be asked about the history
+	swift build --configuration $(CONFIG) --product BeholderMCP
+
+.PHONY: mcp-add
+mcp-add: mcp ## Print the command that registers the MCP server with Claude
+	@# Printed rather than run. Registering a server in someone's assistant configuration
+	@# is their decision, and a target that quietly edited it would be the one surprising
+	@# thing in a Makefile that otherwise only touches this directory.
+	@echo "Register the MCP server by running:"
+	@echo
+	@echo "  claude mcp add beholder -- $(abspath $(BUILD))/BeholderMCP"
+	@echo
+	@echo "Then ask: \"is Beholder recording anything?\""
+	@echo "Remove it again with: claude mcp remove beholder"
+
+.PHONY: mcp-install
+mcp-install: mcp ## (root) Install the MCP server to /usr/local/libexec
+	sudo install -m 755 $(BUILD)/BeholderMCP /usr/local/libexec/beholder-mcp
+	@echo
+	@echo "Installed to /usr/local/libexec/beholder-mcp."
+	@echo
+	@# `claude mcp add` refuses rather than replaces when the name is taken, and the
+	@# common path here is re-pointing an existing registration from the .build copy to
+	@# this one — so lead with the remove. It is harmless when nothing is registered.
+	@echo "Point your assistant at it by running:"
+	@echo
+	@echo "  claude mcp remove beholder 2>/dev/null; \\"
+	@echo "  claude mcp add beholder -- /usr/local/libexec/beholder-mcp"
+	@echo
+	@echo "Registering this copy rather than the one under .build means 'make clean'"
+	@echo "cannot leave the registration pointing at a binary that is no longer there."
+
+.PHONY: test-mcp
+test-mcp: mcp ## Check the MCP server's stdout carries nothing but protocol
+	./Scripts/test-mcp-stdio.sh
 
 # ------------------------------------------------------- continuous capture (root)
 
