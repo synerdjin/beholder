@@ -319,10 +319,11 @@ final class TopView: @unchecked Sendable {
         if summary.privateRelayFlowCount > 0 {
             lines.append(
                 """
-                \(pluralised(summary.privateRelayFlowCount, "flow")) go through iCloud Private Relay. \
-                Their real destinations are encrypted end-to-end to Apple and cannot be \
-                determined from this machine — that is the feature working, not a gap in \
-                Beholder.
+                \(pluralised(summary.privateRelayFlowCount, "flow")) to iCloud Private Relay hosts. \
+                What travels over them — DNS queries, or relayed connections — is encrypted, so \
+                it cannot be read from this machine. That is the feature working, not a gap in \
+                Beholder. Most are macOS resolving names privately, which continues even while a \
+                VPN is up; relaying of ordinary traffic does not.
                 """
             )
         }

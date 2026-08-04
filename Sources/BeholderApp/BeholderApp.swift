@@ -453,9 +453,11 @@ private struct WarningsView: View {
             result.append(
                 (
                     "lock.shield",
-                    "\(pluralised(statistics.privateRelayFlowCount, "connection")) going through iCloud "
-                        + "Private Relay. Their real destinations are encrypted end-to-end "
-                        + "to Apple and cannot be determined from this machine."
+                    "\(pluralised(statistics.privateRelayFlowCount, "connection")) to iCloud "
+                        + "Private Relay hosts. What travels over them — DNS queries, or "
+                        + "relayed connections — is encrypted, so it cannot be read from "
+                        + "this machine. Most are macOS resolving names privately, which "
+                        + "continues even while a VPN is up."
                 )
             )
         }
