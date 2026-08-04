@@ -28,6 +28,10 @@ final class FlowClient {
     private(set) var history: [ThroughputSample] = []
     private static let historyLimit = 300
 
+    /// Generous next to a real snapshot — a busy machine's runs to a few hundred kilobytes
+    /// — and small enough that a stream which never completes one is caught in seconds.
+    private static let maximumMessageBytes = 8 * 1024 * 1024
+
     private let path: String
     private var readerTask: Task<Void, Never>?
     private var previousBytesOut: UInt64?
@@ -96,6 +100,18 @@ final class FlowClient {
             guard let chunk else { return }
             buffer.append(chunk)
 
+            // A stream with no newline in it is not a slow snapshot, it is a broken one,
+            // and appending forever turns that into unbounded memory growth: this window
+            // quietly accumulated tens of megabytes against a daemon whose framing was
+            // wrong. Cap it, say so, and drop the connection to resynchronise.
+            if buffer.count > Self.maximumMessageBytes {
+                state = .failed(
+                    "The daemon sent \(buffer.count) bytes without completing a single "
+                        + "snapshot. Its output is not framed as this app expects."
+                )
+                return
+            }
+
             // A snapshot can span several reads, so consume only whole lines.
             while let newline = buffer.firstIndex(of: 0x0A) {
                 let line = buffer[buffer.startIndex..<newline]
@@ -107,8 +123,20 @@ final class FlowClient {
 
     private func apply(_ line: Data) {
         guard !line.isEmpty else { return }
-        guard let decoded = try? FlowSnapshot.decoder().decode(FlowSnapshot.self, from: line)
-        else { return }
+
+        let decoded: FlowSnapshot
+        do {
+            decoded = try FlowSnapshot.decoder().decode(FlowSnapshot.self, from: line)
+        } catch {
+            // Say so rather than discarding it. A silently dropped line is
+            // indistinguishable from no line at all, so a daemon sending something this
+            // app cannot read looked exactly like a daemon that was not there.
+            state = .failed(
+                "Received \(line.count) bytes from the daemon that this app could not "
+                    + "decode: \(error.localizedDescription)"
+            )
+            return
+        }
 
         guard decoded.version == WireProtocol.version else {
             state = .failed(

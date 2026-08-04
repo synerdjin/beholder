@@ -32,9 +32,9 @@ app: ## Build the app bundle
 test: ## Run the test suite
 	swift test
 
-.PHONY: test-server
-test-server: ## Check that a departing reader cannot kill the daemon (needs no root)
-	./Scripts/test-server-resilience.sh
+.PHONY: test-socket
+test-socket: ## Check the publishing socket keeps its framing and survives readers leaving
+	./Scripts/test-publishing-socket.sh
 
 .PHONY: check
 check: ## Build and test, failing on any warning
@@ -43,7 +43,7 @@ check: ## Build and test, failing on any warning
 		echo "Build produced warnings."; exit 1; \
 	fi
 	@swift test
-	@./Scripts/test-server-resilience.sh
+	@./Scripts/test-publishing-socket.sh
 
 # ------------------------------------------------------------------------- running
 

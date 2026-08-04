@@ -273,6 +273,14 @@ private struct WaitingView: View {
                         .foregroundStyle(.secondary)
                         .textSelection(.enabled)
                 }
+            case .connected:
+                // Connected but holding no snapshot yet. Worth saying distinctly:
+                // reporting this as "connecting" once hid a daemon that was streaming
+                // perfectly well but whose messages the app could not decode, and sent
+                // the search to the socket instead of to the data crossing it.
+                ProgressView()
+                Text("Connected — waiting for the first snapshot")
+                    .foregroundStyle(.secondary)
             default:
                 ProgressView()
                 Text("Connecting to the capture daemon")
