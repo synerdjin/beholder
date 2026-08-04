@@ -95,6 +95,12 @@ cat > "${PLIST}" <<PLIST_END
         <key>SUDO_GID</key>
         <string>${REAL_GID}</string>
     </dict>
+    <!-- Both streams, not just stderr. The daemon reports what it is capturing, where it
+         is publishing and where history goes on stdout, and launchd discards stdout by
+         default — so an installed daemon left no record of anything at all, which is
+         exactly what you need when it misbehaves. -->
+    <key>StandardOutPath</key>
+    <string>/var/log/beholderd.log</string>
     <key>StandardErrorPath</key>
     <string>/var/log/beholderd.err</string>
     <!-- Capture is steady background work, not something to compete with the user. -->
@@ -120,10 +126,12 @@ if launchctl print "system/${LABEL}" > /dev/null 2>&1; then
     echo "Beholder is now capturing continuously and will start at boot."
     echo
     echo "  History:   ${DATA_DIR}/history.sqlite"
+    echo "  Output:    /var/log/beholderd.log"
     echo "  Errors:    /var/log/beholderd.err"
     echo "  Stop it:   sudo ${ROOT}/Scripts/uninstall-daemon.sh"
     echo
     echo "Open the app any time to watch: make open-app"
+    echo "If it cannot see the daemon:     make doctor"
 else
     echo "The daemon did not start. Check /var/log/beholderd.err." >&2
     exit 1

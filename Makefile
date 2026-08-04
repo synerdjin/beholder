@@ -103,6 +103,41 @@ trackers-status: ## Report whether the tracker index is installed
 .PHONY: data
 data: geoip trackers ## Download both optional databases
 
+# ---------------------------------------------------------------------- diagnostics
+
+.PHONY: doctor
+doctor: ## Diagnose why the app cannot see the daemon
+	@echo "Daemon process:"
+	@ps -Ao pid,lstart,command | grep -E "(libexec/)?beholderd --serve" | grep -v grep \
+		|| echo "  not running"
+	@echo
+	@echo "launchd job:"
+	@launchctl print system/com.beholder.daemon 2>/dev/null \
+		| grep -E "^\s*(state|pid|runs|last exit code) " || echo "  not installed"
+	@echo
+	@echo "Publishing socket:"
+	@if [ -S /var/run/beholder.sock ]; then \
+		ls -la /var/run/beholder.sock; \
+		if python3 -c "import socket,sys; s=socket.socket(socket.AF_UNIX); s.settimeout(2); s.connect('/var/run/beholder.sock')" 2>/dev/null; then \
+			echo "  accepting connections - healthy"; \
+		else \
+			echo "  PRESENT BUT REFUSING CONNECTIONS - stale socket, restart the daemon:"; \
+			echo "    sudo launchctl kickstart -k system/com.beholder.daemon"; \
+		fi; \
+	else \
+		echo "  no socket at /var/run/beholder.sock"; \
+	fi
+	@echo
+	@echo "Recent daemon output:"
+	@tail -5 /var/log/beholderd.log 2>/dev/null || echo "  (none)"
+	@tail -5 /var/log/beholderd.err 2>/dev/null
+
+.PHONY: restart
+restart: ## (root) Restart the installed daemon
+	sudo launchctl kickstart -k system/com.beholder.daemon
+	@sleep 1
+	@$(MAKE) --no-print-directory doctor
+
 # ------------------------------------------------------------------------- history
 
 .PHONY: history
