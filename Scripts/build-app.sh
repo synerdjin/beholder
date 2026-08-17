@@ -30,6 +30,7 @@ echo "Assembling ${APP}..."
 rm -rf "${APP}"
 mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
 cp "${BUILD_DIR}/BeholderApp" "${APP}/Contents/MacOS/Beholder"
+cp "${ROOT}/Resources/AppIcon/Beholder.icns" "${APP}/Contents/Resources/Beholder.icns"
 
 cat > "${APP}/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -43,6 +44,8 @@ cat > "${APP}/Contents/Info.plist" <<'PLIST'
     <key>CFBundleIdentifier</key>
     <string>com.beholder.app</string>
     <key>CFBundleExecutable</key>
+    <string>Beholder</string>
+    <key>CFBundleIconFile</key>
     <string>Beholder</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
