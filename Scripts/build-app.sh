@@ -16,8 +16,15 @@ APP="$ROOT/.build/Beholder.app"
 # Braces on every expansion, and plain ASCII in the messages. An unbraced "$APP…" makes
 # bash read the leading byte of the multibyte ellipsis as part of the variable name,
 # which under `set -u` aborts the script with a confusing "APP?: unbound variable".
-echo "Building BeholderApp (${CONFIGURATION})..."
-swift build --package-path "${ROOT}" --configuration "${CONFIGURATION}" --product BeholderApp
+# BEHOLDER_SKIP_BUILD is for callers that have just run `swift build` in this same
+# configuration — a plain `swift build` covers every product, so repeating it here is a
+# guaranteed no-op that still costs a second of SwiftPM startup. Run on its own, which is
+# how the Makefile and `./beholder` use it, this still builds: the assumption is only safe
+# when someone states it.
+if [[ "${BEHOLDER_SKIP_BUILD:-0}" != "1" ]]; then
+    echo "Building BeholderApp (${CONFIGURATION})..."
+    swift build --package-path "${ROOT}" --configuration "${CONFIGURATION}" --product BeholderApp
+fi
 
 echo "Assembling ${APP}..."
 rm -rf "${APP}"
