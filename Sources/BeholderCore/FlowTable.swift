@@ -45,13 +45,18 @@ public final class FlowTable {
     /// short-lived sockets — a DNS query and its answer can be over in under a
     /// millisecond — where waiting for the next scheduled attribution poll means the
     /// socket is already gone.
+    ///
+    /// `direction` is returned because normalisation is the only place that knows it: the
+    /// answer needs the set of local interface addresses, which lives here rather than on
+    /// the capture queue. A caller holding payload bytes copied during the capture
+    /// callback has no other way to learn which way they went.
     @discardableResult
     public func record(
         _ packet: ParsedPacket,
         interfaceName: String,
         localAddresses: Set<IPAddress>,
         at timestamp: Date = Date()
-    ) -> (key: FlowKey, isNew: Bool) {
+    ) -> (key: FlowKey, isNew: Bool, direction: FlowDirection) {
         let (key, direction) = FlowKey.make(from: packet, localAddresses: localAddresses)
 
         let isNew = flows[key] == nil
@@ -64,7 +69,7 @@ public final class FlowTable {
             tcpFlags: packet.tcpFlags,
             at: timestamp
         )
-        return (key, isNew)
+        return (key, isNew, direction)
     }
 
     /// Applies an ownership lookup to every flow that still lacks one.
@@ -100,6 +105,18 @@ public final class FlowTable {
         guard flows[key] != nil else { return }
         flows[key]?.hostName = name
         flows[key]?.hostNameSource = .serverNameIndication
+    }
+
+    /// Records what a connection turned out to be speaking. The rule for when a reading may
+    /// change lives on `Flow.adopt`, next to the other evidence rules.
+    ///
+    /// Written as a mutation through the subscript rather than read-modify-write. Unlike
+    /// the other `apply*` methods here, this one runs on *every* packet — the sniffer
+    /// returns a reading for anything with ports — and pulling a `Flow` out of the
+    /// dictionary to inspect it copies the whole struct, retaining and releasing every
+    /// string it holds. `flows[key]?.adopt(...)` mutates in place instead.
+    public func applyReading(_ reading: ProtocolSniffer.Reading, for key: FlowKey) {
+        flows[key]?.adopt(reading)
     }
 
     /// Fills in hostnames for flows that do not already have better evidence. Applied to

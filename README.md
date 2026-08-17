@@ -11,7 +11,7 @@ make run          # builds both halves, asks for your password once, opens the a
 ```
 
 Requires macOS 14+ and Xcode's Swift toolchain. Nothing else — no Apple Developer account,
-no third-party packages. `make help` lists every target; `make check` builds, runs the 101
+no third-party packages. `make help` lists every target; `make check` builds, runs the 209
 tests and exercises the daemon's socket without needing root.
 
 ## Why not just do what Little Snitch does?
@@ -231,6 +231,17 @@ show it; an unauthenticated writer would be a real hole.
 There is no Xcode project. A macOS app bundle is a directory with an `Info.plist` in it,
 and `Scripts/build-app.sh` arranges one around the SwiftPM binary.
 
+**Phase 5 — what is unprotected. Done.**
+
+- [x] Every connection classified cleartext / encrypted / unknown, on by default
+- [x] Protocol identification from payload signatures, falling back to port convention
+- [x] Evidence recorded alongside every reading, so a guess never reads as an observation
+- [x] `--read-cleartext`: the opening bytes of unencrypted connections, in memory only
+- [x] `Cleartext` view — the exposed connections, and a reader for what they carry
+
+See [Reading unprotected traffic](#reading-unprotected-traffic), which is where the
+trade-off this makes is written down rather than left to be discovered.
+
 **Later**
 
 - [ ] GeoIP and the world map — rest of Phase 3
@@ -256,6 +267,10 @@ stays at zero means packets are being captured but not drained.
 
 With no interface arguments it captures whatever carries the default route. Pass names to
 override, or `--loopback` to add `lo0`.
+
+Add `--read-cleartext` to keep the opening bytes of connections that are not encrypted, so
+the app can show what they carry. Off by default, memory only, and described in
+[Reading unprotected traffic](#reading-unprotected-traffic).
 
 ### Run transcripts
 
@@ -284,8 +299,9 @@ the isolation and object-lifetime faults that otherwise only appear under `sudo`
 
 Beholder sees everything this machine does, so it is deliberately conservative:
 
-- Metadata only. Packet payloads are never stored; the 512-byte snaplen exists to read
-  headers, DNS answers and TLS SNI, and bulk payload stays in the kernel.
+- Metadata only **unless you ask otherwise**. By default no packet payload is kept: the
+  1024-byte snaplen exists to read headers, DNS answers and TLS SNI, and bulk payload stays
+  in the kernel. `--read-cleartext` changes that, and is described in full below.
 - Promiscuous mode is off. Beholder watches this host, not the local network.
 - No telemetry. Beholder never contacts anything on its own. Two things can send data off
   this machine, both explicit and both started by you: downloading the GeoIP and tracker
@@ -302,6 +318,56 @@ A redacting mode was considered and dropped. Pseudonymised hostnames make the an
 worthless — "host-4f2a used 2 GB" answers nothing anyone asked — and a half-private mode
 is worse than none, because it invites you to believe less left the machine than did. So
 it is full fidelity, off until registered, and written down here instead of buried.
+
+### Reading unprotected traffic
+
+Every connection is classified as **cleartext**, **encrypted** or **unknown**, always and
+for free — that is metadata like any other, and the `Cleartext` view lists what is exposed
+without reading a single byte of it.
+
+`--read-cleartext` is the other thing. It keeps the opening 4 KB of each direction of
+connections that are not encrypted, so the app can show what is actually being sent, and it
+is a real reversal of the bullet above: without it Beholder holds facts about traffic, and
+with it Beholder holds some of the traffic. It is worth being blunt about what that means,
+because the interesting connections are interesting precisely for what they carry:
+
+- Session cookies, `Authorization` headers, API keys in query strings and form posts are
+  all displayed verbatim, in a window, to whoever is at the keyboard.
+- Redaction was considered and dropped, for the same reason it was dropped for hostnames:
+  blanking the interesting value defeats the purpose of looking, and a half-redacted view
+  invites the belief that less is exposed than actually is.
+
+What bounds it instead:
+
+- **Off by default.** No flag, no copying — the code path is not merely unused, it is
+  never entered.
+- **Memory only.** The bytes live in the running daemon and are released when a connection
+  ends. They are never written to the history database and never written to the run
+  transcript, so nothing survives the daemon exiting.
+- **Bounded.** 4 KB per direction, 64 connections at a time, oldest released first. Enough
+  for a request line, its headers and the start of a response — the part that says what a
+  connection is for.
+- **Never over MCP.** The MCP server gained the `security` and `protocol` fields on
+  `live_connections` and nothing else. No tool returns payload, and none should: it would
+  mean sending exactly the credentials above to an assistant on any turn.
+
+```bash
+sudo ./.build/debug/beholderd --serve --read-cleartext
+```
+
+**Cleartext is proof; encrypted is an inference; unknown is neither.** A plaintext protocol
+marker was read off the wire, so `cleartext` says something observed. `encrypted` rests on
+a TLS record header, an SSH banner, or a port convention — evidence that a handshake
+happened, not that it succeeded. And bytes matching nothing are reported as `unknown`,
+never as encrypted: unrecognised binary looks exactly like ciphertext, and calling it
+encrypted would be claiming something never observed, in the direction that reassures.
+`unknown` is listed alongside cleartext in the exposed view — an unidentified protocol on a
+high port is exactly what a person looking at this screen wants to see — but it is labelled
+separately everywhere, because one is an observation and the other is the lack of one.
+
+One consequence worth knowing: a connection proven to carry cleartext stays reported that
+way even if it later negotiates TLS. A STARTTLS session did carry bytes in the clear, and
+that does not stop being true.
 
 Hostnames arrive from the network, which means anyone who can make this machine resolve a
 name chooses a string that ends up in an assistant's context. They are sent as delimited
@@ -328,6 +394,15 @@ suspicious host has defeated its own purpose.
   than the individual connections it affected.
 - ICMP has no ports and therefore no socket, so it is never attributed to a process and is
   counted separately rather than inflating the unattributed figure.
+- A connection is only identified once it says something Beholder recognises. One that was
+  already open when capture started, and whose handshake is long past, is classified from
+  its port alone — which the display labels as inferred rather than read.
+- Payload reading sees whole packets, not a reassembled stream. A request line split across
+  a TCP segment boundary, or arriving out of order, will not match; in practice a request
+  and its headers arrive in the first segment, which is why this is a limitation rather
+  than a defect. It is also why `unknown` exists.
+- Nothing here decrypts anything. `encrypted` means Beholder can see that a connection is
+  protected and therefore cannot read it — which is the answer, not a failure.
 - Unsigned, so installing the daemon needs a `sudo` script rather than `SMAppService`, and
   macOS may require a one-time approval in Login Items & Extensions. A Developer ID would
   remove both.

@@ -50,10 +50,15 @@ trap cleanup EXIT
 # --self-test runs the publishing path with no interfaces, so this needs no root and no
 # live traffic. It stops itself after three ticks and should exit 0. Each check gets its
 # own instance: three ticks is not long enough to share.
+#
+# Usage: start_daemon [send-buffer] [extra daemon flags...]
 start_daemon() {
+    local send_buffer="${1:-}"
+    shift || true
+
     SOCKET="$(mktemp -u "${TMPDIR:-/tmp}/beholder-test-XXXXXX.sock")"
-    BEHOLDER_TEST_SEND_BUFFER="${1:-}" \
-        "${DAEMON}" --serve --self-test --no-log --socket "${SOCKET}" > /dev/null 2>&1 &
+    BEHOLDER_TEST_SEND_BUFFER="${send_buffer}" \
+        "${DAEMON}" --serve --self-test --no-log --socket "${SOCKET}" "$@" > /dev/null 2>&1 &
     DAEMON_PID=$!
 
     for _ in $(seq 1 50); do
@@ -213,3 +218,72 @@ if [[ "${ACCEPTED}" -lt 30 ]]; then
 fi
 
 echo "PASS: ${ACCEPTED} readers disconnected at every stage of a write, daemon survived."
+
+# --------------------------------------------- 3. payload reading announces itself
+
+# The app tells "nothing is reading payload" from "reading, and there was nothing to read"
+# by whether `cleartextExcerpts` is absent or an empty list. Get that wrong and both states
+# render as the same blank screen, which is the ambiguity this project makes a rule of
+# avoiding — so the distinction is asserted on the wire rather than trusted.
+#
+# --self-test captures nothing, which is what makes this a clean test of the *absence* of
+# payload: the list must be present and empty, never missing.
+read_snapshot() {
+    python3 - "$1" <<'PY'
+import json, socket, sys, time
+
+client = socket.socket(socket.AF_UNIX)
+client.settimeout(0.5)
+client.connect(sys.argv[1])
+
+buffer = b""
+deadline = time.time() + 4
+while time.time() < deadline and b"\n" not in buffer:
+    try:
+        chunk = client.recv(8192)
+    except socket.timeout:
+        continue
+    if not chunk:
+        break
+    buffer += chunk
+
+if b"\n" not in buffer:
+    sys.exit("no complete snapshot arrived")
+
+snapshot = json.loads(buffer.split(b"\n")[0])
+if "cleartextExcerpts" not in snapshot:
+    print("absent")
+else:
+    value = snapshot["cleartextExcerpts"]
+    if not isinstance(value, list):
+        sys.exit(f"cleartextExcerpts is {type(value).__name__}, not a list")
+    print(f"present:{len(value)}")
+PY
+}
+
+start_daemon "" --read-cleartext
+if ! WITH_FLAG="$(read_snapshot "${SOCKET}")"; then
+    echo "FAIL: no snapshot from a daemon started with --read-cleartext." >&2
+    exit 1
+fi
+require_clean_exit "reading payload"
+
+start_daemon
+if ! WITHOUT_FLAG="$(read_snapshot "${SOCKET}")"; then
+    echo "FAIL: no snapshot from a daemon started without --read-cleartext." >&2
+    exit 1
+fi
+require_clean_exit "not reading payload"
+
+if [[ "${WITH_FLAG}" != present:* ]]; then
+    echo "FAIL: --read-cleartext published no excerpt list (got '${WITH_FLAG}')." >&2
+    echo "      An empty list is required: it is what says the daemon is looking." >&2
+    exit 1
+fi
+if [[ "${WITHOUT_FLAG}" != "absent" ]]; then
+    echo "FAIL: a daemon not reading payload still published '${WITHOUT_FLAG}'." >&2
+    echo "      The field must be absent, or the app cannot tell it is not looking." >&2
+    exit 1
+fi
+
+echo "PASS: --read-cleartext publishes an excerpt list (${WITH_FLAG}); without it, absent."

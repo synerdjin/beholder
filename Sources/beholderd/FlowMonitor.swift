@@ -20,6 +20,10 @@ final class FlowMonitor: @unchecked Sendable {
     // Confined to flowQueue.
     private let table = FlowTable()
     private let names = NameResolutionCache()
+    /// The opening bytes of unencrypted connections. Nil unless `--read-cleartext` was
+    /// given, which is what keeps the default run exactly as it always was: no payload is
+    /// copied, so none can be published, logged or stored.
+    private let excerpts: PayloadExcerptStore?
     /// Nil when no geolocation database is installed, which is a normal state — it is
     /// large, separately licensed, and fetched deliberately.
     private let geography = GeoIPDatabase.loadFromStandardPaths()
@@ -67,20 +71,36 @@ final class FlowMonitor: @unchecked Sendable {
     /// connections opens at once — a page load can create dozens in a few milliseconds.
     private static let onDemandMinimumGap: TimeInterval = 0.025
 
-    init() {
+    init(readCleartext: Bool = false) {
         self.localAddresses = LocalAddresses.current()
+        self.excerpts = readCleartext ? PayloadExcerptStore() : nil
+        // Read once here rather than through the optional on every packet: the capture
+        // callback runs on its own queue and must not touch flowQueue-confined state.
+        self.isReadingCleartext = readCleartext
     }
+
+    /// Whether payload copying is on. Immutable after init, so the capture queue may read
+    /// it without synchronisation — unlike `excerpts`, which belongs to flowQueue.
+    private let isReadingCleartext: Bool
 
     /// The handler to give `CaptureEngine`.
     ///
-    /// Hostname extraction happens *here*, synchronously, before anything is dispatched
+    /// Payload inspection happens *here*, synchronously, before anything is dispatched
     /// elsewhere. The payload buffer belongs to libpcap and dies the moment this returns,
     /// so the observation is turned into owned values first and only those cross onto the
     /// flow queue.
+    ///
+    /// That is also why a payload excerpt arrives unlabelled: which way the packet went is
+    /// decided by `FlowKey` normalisation against the local address set, which belongs to
+    /// the flow queue. The bytes are copied here and given a direction there.
     func packetHandler() -> PacketSink {
         { [weak self] packet, payload, interfaceName in
             guard let self else { return }
-            let observation = PayloadInspector.inspect(packet: packet, payload: payload)
+            let observation = PayloadInspector.inspect(
+                packet: packet,
+                payload: payload,
+                capturePayload: self.isReadingCleartext
+            )
 
             self.flowQueue.async {
                 let result = self.table.record(
@@ -89,7 +109,7 @@ final class FlowMonitor: @unchecked Sendable {
                     localAddresses: self.localAddresses
                 )
                 if let observation {
-                    self.apply(observation, to: result.key)
+                    self.apply(observation, to: result.key, direction: result.direction)
                 }
                 if result.isNew {
                     self.requestImmediateAttribution()
@@ -99,8 +119,29 @@ final class FlowMonitor: @unchecked Sendable {
     }
 
     /// Runs on flowQueue.
-    private func apply(_ observation: NameObservation, to key: FlowKey) {
-        switch observation {
+    private func apply(
+        _ observation: PacketObservation,
+        to key: FlowKey,
+        direction: FlowDirection
+    ) {
+        if let reading = observation.reading {
+            table.applyReading(reading, for: key)
+        }
+        if let bytes = observation.excerptBytes, let excerpts {
+            // Called for every packet, including once the buffer for this flow is full.
+            // The store discards the bytes at that point but keeps counting them, and that
+            // count is what the reader shows as "first 4 KB of 900 KB". Skipping the call
+            // to save the work would freeze the total and make the caveat wrong.
+            excerpts.append(
+                PayloadExcerpt(
+                    direction: direction,
+                    bytes: bytes,
+                    observedBytes: observation.payloadBytesSeen
+                ),
+                for: key
+            )
+        }
+        switch observation.name {
         case .serverName(let name):
             table.setServerName(name, for: key)
         case .dnsAnswer(let answer):
@@ -110,6 +151,8 @@ final class FlowMonitor: @unchecked Sendable {
             // show a name rather than an address.
             table.applyNames { self.names.resolved(for: $0) }
             classifyNamedFlows()
+        case nil:
+            break
         }
     }
 
@@ -296,7 +339,13 @@ final class FlowMonitor: @unchecked Sendable {
             }
         }
 
-        table.expire(at: now)
+        let expired = table.expire(at: now)
+        // Release payload as soon as a conversation is over, rather than waiting for
+        // eviction pressure. This is the one structure in Beholder holding the contents of
+        // traffic, so it should hold as little of it, for as short a time, as it can.
+        if let excerpts {
+            for flow in expired { excerpts.forget(flow.key) }
+        }
         persistRetiredFlows(at: now)
         names.expire(at: now)
     }
@@ -398,6 +447,13 @@ final class FlowMonitor: @unchecked Sendable {
         var restoredNameCount: Int
         var reverseLookupsAttempted: Int
         var reverseLookupsSucceeded: Int
+        /// Connections by what is known about their protection. Kept apart rather than
+        /// summed into "unencrypted", because `cleartext` was read off the wire and
+        /// `unknown` is the absence of a reading — reporting them as one figure would
+        /// claim observations that were never made.
+        var cleartextFlowCount: Int
+        var unknownSecurityFlowCount: Int
+        var encryptedFlowCount: Int
     }
 
     /// Builds the published form of the current state.
@@ -427,16 +483,66 @@ final class FlowMonitor: @unchecked Sendable {
         statistics.packetsCaptured = packetsCaptured
         statistics.packetsDropped = packetsDropped
         statistics.interfaceTransitions = transitions
+        statistics.cleartextFlowCount = current.cleartextFlowCount
+        statistics.unknownSecurityFlowCount = current.unknownSecurityFlowCount
+        statistics.encryptedFlowCount = current.encryptedFlowCount
         statistics.warnings = ProxyDetection.findLikelyProxies(in: current.flows)
             .map(\.advice)
+
+        let payload = publishableExcerpts()
+        if payload.dropped > 0 {
+            statistics.warnings.append(
+                """
+                Payload for \(payload.dropped) unencrypted \
+                \(payload.dropped == 1 ? "connection is" : "connections are") not shown: \
+                this snapshot reached its \
+                \(WireProtocol.maximumExcerptBytesPerSnapshot / 1024) KB payload limit.
+                """
+            )
+        }
+        if payload.evicted > 0 {
+            statistics.warnings.append(
+                """
+                Payload for \(payload.evicted) earlier \
+                \(payload.evicted == 1 ? "connection was" : "connections were") released to \
+                stay within the \(PayloadExcerptStore.maximumFlows)-connection buffer.
+                """
+            )
+        }
 
         return FlowSnapshot(
             generatedAt: Date(),
             startedAt: startedAt,
             interfaces: interfaces,
             flows: current.flows.map { $0.wireRepresentation() },
-            statistics: statistics
+            statistics: statistics,
+            cleartextExcerpts: payload.excerpts
         )
+    }
+
+    /// Collects buffered payload for publication.
+    ///
+    /// Returns nil excerpts — not an empty array — when payload reading is off, because
+    /// the client distinguishes the two: nil is "nothing is reading payload", empty is
+    /// "reading, and there was nothing to read". Collapsing them would show the same blank
+    /// list for a daemon that was never asked to look and one that looked and found
+    /// nothing.
+    ///
+    /// The selection itself lives in `PayloadExcerptStore.publishable(budget:)`, in Core,
+    /// where a test can reach it — this is the one per-snapshot bound on the structure
+    /// holding traffic contents, and an inverted sort or an off-by-one budget would
+    /// otherwise be silent. All that is left here is the hop onto the flow queue.
+    private func publishableExcerpts()
+        -> (excerpts: [WireExcerpt]?, dropped: Int, evicted: UInt64)
+    {
+        guard isReadingCleartext else { return (nil, 0, 0) }
+        return flowQueue.sync {
+            guard let excerpts else { return (nil, 0, 0) }
+            let selected = excerpts.publishable(
+                budget: WireProtocol.maximumExcerptBytesPerSnapshot
+            )
+            return (selected.excerpts, selected.dropped, excerpts.evictedFlowCount)
+        }
     }
 
     func summary() -> Summary {
@@ -459,8 +565,19 @@ final class FlowMonitor: @unchecked Sendable {
             var undetermined = 0
             var out: UInt64 = 0
             var incoming: UInt64 = 0
+            var cleartext = 0
+            var unknownSecurity = 0
+            var encrypted = 0
 
             for flow in flows {
+                switch flow.security?.security {
+                case .cleartext: cleartext += 1
+                case .encrypted: encrypted += 1
+                case .unknown: unknownSecurity += 1
+                // No ports, so no connection to characterise. Counted nowhere rather than
+                // swept into "unknown", which would imply something was looked at.
+                case nil: break
+                }
                 if let owner = flow.owner {
                     owners.insert(owner)
                 } else if flow.key.transport.hasPorts {
@@ -511,7 +628,10 @@ final class FlowMonitor: @unchecked Sendable {
                 namedByReverseLookup: byReverse,
                 restoredNameCount: restoredNameCount,
                 reverseLookupsAttempted: reverseStatistics.attempted,
-                reverseLookupsSucceeded: reverseStatistics.succeeded
+                reverseLookupsSucceeded: reverseStatistics.succeeded,
+                cleartextFlowCount: cleartext,
+                unknownSecurityFlowCount: unknownSecurity,
+                encryptedFlowCount: encrypted
             )
         }
     }

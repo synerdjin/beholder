@@ -138,6 +138,13 @@ public struct Flow: Sendable {
     /// the only identification available for an address nothing else can name.
     public var networkOperator: NetworkOperator?
 
+    /// Whether this conversation protects what it carries, and what that rests on.
+    ///
+    /// Nil for ICMP and anything else without ports, where there is no connection to
+    /// characterise. Updated through `FlowTable.applyReading`, which honours the evidence
+    /// ladder so a port guess on a later packet cannot undo something read from the bytes.
+    public var security: ProtocolSniffer.Reading?
+
     /// Whether this machine opened the connection, rather than accepting one.
     ///
     /// Nil only before the first packet is recorded. Determining it from port numbers
@@ -225,6 +232,31 @@ public struct Flow: Sendable {
 
         tcpFlagsSeen.formUnion(tcpFlags)
         lastSeen = timestamp
+    }
+
+    /// Takes on a security reading, if it is allowed to replace what is already known.
+    ///
+    /// Never downgrades, for the same reason a hostname does not: every packet after the
+    /// first of an HTTP conversation looks like nothing in particular, so a reading taken
+    /// from the request line would otherwise be replaced a millisecond later by a port
+    /// guess — or by `unknown`, which would make the display flicker between "this is
+    /// HTTP" and "no idea" for the life of the connection.
+    ///
+    /// Proven cleartext is also sticky: once bytes have been read off this connection in
+    /// the clear, they were in the clear, and nothing later can make that untrue. A
+    /// STARTTLS session therefore stays reported as cleartext, which is the accurate thing
+    /// to say about a conversation that began unprotected. It also closes a false positive
+    /// that would otherwise run the wrong way — a few bytes of binary in an HTTP body can
+    /// happen to open like a TLS record header, and without this the connection would flip
+    /// to "encrypted" mid-stream and reassure the user about traffic it had just watched
+    /// go past in plain text.
+    public mutating func adopt(_ reading: ProtocolSniffer.Reading) {
+        if let current = security {
+            if current.evidence > reading.evidence { return }
+            let provenCleartext = current.evidence == .payload && current.security == .cleartext
+            if provenCleartext, reading.security != .cleartext { return }
+        }
+        security = reading
     }
 }
 
