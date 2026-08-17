@@ -68,14 +68,33 @@ enum Beholderd {
         // Flows are needed to draw the live view and to publish to the app. Without
         // either, packets are only counted, which is all the statistics view wants.
         let needsFlows = options.top || options.serve
-        let monitor = needsFlows ? FlowMonitor() : nil
+
+        // Payload reading only has somewhere to go when flows are being tracked. Asked for
+        // without --serve or --top it is reported rather than refused, since a run that
+        // only counts packets has nothing the excerpts could attach to.
+        let readCleartext = options.readsCleartext
+        if options.readCleartext, !readCleartext {
+            note("--read-cleartext has no effect without --serve or --top")
+        }
+        if readCleartext {
+            print("Reading payload of unencrypted connections. Held in memory only:")
+            print("nothing is written to the history database or to the transcript.")
+            print("")
+        }
+
+        let monitor = needsFlows ? FlowMonitor(readCleartext: readCleartext) : nil
         let packetHandler: PacketSink
         if let monitor {
             packetHandler = monitor.packetHandler()
         } else {
             packetHandler = { _, _, _ in }
         }
-        let engine = CaptureEngine(onPacket: packetHandler)
+        let engine = CaptureEngine(
+            snapshotLength: readCleartext
+                ? CaptureEngine.cleartextSnapshotLength
+                : CaptureEngine.defaultSnapshotLength,
+            onPacket: packetHandler
+        )
 
         let log = makeLog(options)
         if let log {

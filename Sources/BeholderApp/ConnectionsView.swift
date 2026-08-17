@@ -255,6 +255,11 @@ private struct FlowRow: View {
                     )
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    SecurityBadge(
+                        security: flow.security,
+                        protocolName: flow.protocolName,
+                        isProof: flow.securityIsProof
+                    )
                     ClassificationBadges(classification: flow.classification)
                     // For an address nothing could name, the network announcing it is
                     // usually the only identification available — and is often enough to
@@ -330,6 +335,11 @@ private struct FlowRow: View {
         }
         if let state = flow.tcpState {
             lines.append("state: \(state)")
+        }
+        if let security = securityDescription(
+            flow.security, protocolName: flow.protocolName, isProof: flow.securityIsProof
+        ) {
+            lines.append("security: \(security)")
         }
         lines.append(
             "traffic: \(formatBytes(Double(flow.bytesOut))) up, "

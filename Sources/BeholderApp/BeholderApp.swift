@@ -140,6 +140,7 @@ private struct MenuBarContent: View {
 
 private enum Presentation: String, CaseIterable, Identifiable {
     case connections = "Connections"
+    case cleartext = "Cleartext"
     case map = "Map"
     case history = "History"
     var id: String { rawValue }
@@ -147,6 +148,7 @@ private enum Presentation: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .connections: return "list.bullet"
+        case .cleartext: return "lock.open"
         case .map: return "globe"
         case .history: return "clock.arrow.circlepath"
         }
@@ -159,6 +161,7 @@ private struct MainView: View {
     @State private var grouping: Grouping = .process
     @State private var unidentifiedOnly = false
     @State private var history = HistoryModel()
+    @State private var exposedSelection: WireFlow.ID?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -189,6 +192,8 @@ private struct MainView: View {
                         grouping: $grouping,
                         unidentifiedOnly: $unidentifiedOnly
                     )
+                case .cleartext:
+                    CleartextView(snapshot: snapshot, selection: $exposedSelection)
                 case .map:
                     ConnectionMapView(snapshot: snapshot)
                 case .history:

@@ -56,6 +56,10 @@ run: build ## (root) Start capture and open the app. Ctrl-C stops both
 serve: daemon-bin ## (root) Capture and publish for the app, drawing nothing
 	sudo $(DAEMON) --serve --loopback
 
+.PHONY: cleartext
+cleartext: daemon-bin ## (root) Capture and publish, also reading unencrypted payload
+	sudo $(DAEMON) --serve --loopback --read-cleartext
+
 .PHONY: top
 top: daemon-bin ## (root) Live connection table in the terminal
 	sudo $(DAEMON) --top --loopback

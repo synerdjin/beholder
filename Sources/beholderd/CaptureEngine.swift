@@ -339,6 +339,15 @@ final class CaptureEngine: @unchecked Sendable {
     /// extension, silently costing hostnames. The extra copy is a few hundred KB per
     /// second even on a busy link, and none of it is retained.
     static let defaultSnapshotLength: Int32 = 1024
+
+    /// Used only under `--read-cleartext`, where the point is no longer to read a header
+    /// but to read the message. 1024 leaves a full-MTU HTTP request truncated mid-headers,
+    /// which is precisely the part worth seeing.
+    ///
+    /// This is the one setting that meaningfully raises what capture copies out of the
+    /// kernel, which is why it is opt-in rather than simply raised for everyone.
+    static let cleartextSnapshotLength: Int32 = 16384
+
     static let defaultBufferSize: Int32 = 4 * 1024 * 1024
     static let defaultFilter = "ip or ip6"
 
@@ -346,7 +355,13 @@ final class CaptureEngine: @unchecked Sendable {
     private var captures: [String: InterfaceCapture] = [:]
     private let onPacket: PacketSink
 
-    init(onPacket: @escaping PacketSink) {
+    /// How much of each packet to copy out of the kernel. Fixed for the process lifetime,
+    /// since `InterfaceSupervisor` re-opens capture whenever the route moves and every
+    /// re-open must use the same value the run started with.
+    private let snapshotLength: Int32
+
+    init(snapshotLength: Int32 = CaptureEngine.defaultSnapshotLength, onPacket: @escaping PacketSink) {
+        self.snapshotLength = snapshotLength
         self.onPacket = onPacket
     }
 
@@ -356,7 +371,7 @@ final class CaptureEngine: @unchecked Sendable {
             guard captures[interface] == nil else { return }
             captures[interface] = try InterfaceCapture.open(
                 interfaceName: interface,
-                snapshotLength: Self.defaultSnapshotLength,
+                snapshotLength: snapshotLength,
                 bufferSize: Self.defaultBufferSize,
                 filter: Self.defaultFilter,
                 queue: queue,

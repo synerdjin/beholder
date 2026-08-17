@@ -138,7 +138,10 @@ public struct MCPToolbox: Sendable {
                 A single point-in-time snapshot of currently open connections from the running \
                 capture daemon, with the process that owns each one. Fails if the daemon is not \
                 running; beholder_status explains why. This is one sample rather than a stream — \
-                calling it repeatedly will not show anything changing.
+                calling it repeatedly will not show anything changing. Each row carries a \
+                "security" field of "cleartext", "encrypted" or "unknown", so this also answers \
+                whether anything is currently talking unprotected. Never returns the contents of \
+                any connection, only facts about it.
                 """,
             inputSchema: [
                 "type": "object",
@@ -638,6 +641,13 @@ public struct MCPToolbox: Sendable {
                 "country": optional(flow.location?.countryCode),
                 "net": optional(clean(flow.networkOperator?.organization, limit: 128).value),
                 "company": optional(clean(flow.classification?.owner, limit: 128).value),
+                // Whether the connection protects what it carries. "cleartext" was read
+                // off the wire, "encrypted" is inferred from a handshake or a port, and
+                // "unknown" means neither — reported as three values rather than a boolean
+                // so an answer can never turn "we could not tell" into "it is fine".
+                "security": flow.security.map { JSONValue.string($0.rawValue) },
+                "security_is_proof": flow.securityIsProof.map { JSONValue.bool($0) },
+                "protocol": optional(clean(flow.protocolName, limit: 32).value),
                 "flagged": (host.modified || process.modified) ? .bool(true) : nil,
             ]
         )

@@ -84,9 +84,9 @@ public struct ParsedPacket: Sendable, Equatable {
 
     /// The frame's true length on the wire, taken from pcap's `pkthdr.len`.
     ///
-    /// This is deliberately *not* `caplen`: with a snaplen of 512 every full-MTU packet
-    /// arrives truncated, so counting captured bytes would undercount throughput badly
-    /// and consistently. All byte accounting must use this field.
+    /// This is deliberately *not* `caplen`: at any snaplen Beholder uses, every full-MTU
+    /// packet arrives truncated, so counting captured bytes would undercount throughput
+    /// badly and consistently. All byte accounting must use this field.
     public let wireBytes: UInt32
 
     /// True for a non-initial IP fragment, whose ports live in the first fragment only.

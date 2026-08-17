@@ -17,6 +17,15 @@ struct Options {
     var historyCSV = false
     var historyPath: String?
     var storeHistory = true
+    var readCleartext = false
+
+    /// Whether payload reading will actually happen.
+    ///
+    /// `readCleartext` alone is not the answer: payload has nowhere to go unless flows are
+    /// being tracked. Derived in one place so the three consumers — the monitor, the
+    /// snaplen, and the banner — cannot disagree about it, which would otherwise show up
+    /// as a raised snaplen on a run that keeps nothing.
+    var readsCleartext: Bool { readCleartext && (top || serve) }
 
     static let usage = """
         usage: beholderd [--top] [--loopback] [--log DIR | --no-log]
@@ -43,6 +52,15 @@ struct Options {
                         the user who ran sudo and created mode 0600.
           --socket PATH Publish somewhere other than \(WireProtocol.defaultSocketPath).
           --no-history  Do not record finished connections to the history database.
+          --read-cleartext
+                        Also keep the opening few kilobytes of connections that are not
+                        encrypted, so Beholder.app can show what is actually being sent.
+                        Off by default, and a real change in what this program holds:
+                        without it Beholder keeps facts about traffic, and with it it
+                        keeps some of the traffic. The bytes live in memory only, bounded
+                        and released when a connection ends — never written to the history
+                        database or the run transcript, and never sent over MCP. Raises
+                        the capture snaplen, which costs a little more copying per packet.
 
         Querying history (needs no root if the database is yours):
 
@@ -117,6 +135,8 @@ struct Options {
                 options.historyCSV = true
             case "--no-history":
                 options.storeHistory = false
+            case "--read-cleartext":
+                options.readCleartext = true
             case "--no-log":
                 options.logging = false
             case "--loopback", "-l":

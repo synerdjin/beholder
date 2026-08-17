@@ -185,37 +185,95 @@ public final class NameResolutionCache {
     }
 }
 
-/// Pulls hostnames out of packet payloads.
+/// Everything one packet's payload had to say, as owned values.
+///
+/// A single struct rather than three separate passes over the same bytes: the buffer is
+/// only alive once, and walking it three times would cost three times as much on the
+/// hottest path in the program.
+public struct PacketObservation: Sendable {
+    /// A hostname learned from a ClientHello or a DNS answer.
+    public var name: NameObservation?
+    /// What protocol this is and whether it protects its contents.
+    public var reading: ProtocolSniffer.Reading?
+    /// A copy of the opening bytes, unlabelled: which direction they went is only known
+    /// once the flow key has been normalised, which happens on another queue. Only ever
+    /// non-nil when payload reading was asked for.
+    public var excerptBytes: [UInt8]?
+    /// How much payload the packet carried, which is more than `excerptBytes` holds once a
+    /// packet exceeds the per-packet copy limit. Carried separately so the store can keep
+    /// an honest running total of a conversation's size.
+    public var payloadBytesSeen = 0
+
+    public var isEmpty: Bool { name == nil && reading == nil && excerptBytes == nil }
+}
+
+/// Pulls hostnames, protocol identity and — when asked — payload bytes out of packets.
 ///
 /// **Lifetime contract:** the payload buffer belongs to libpcap and is valid only for the
 /// duration of the capture callback. Everything here must therefore run synchronously,
 /// inside that callback, and return owned values. Deferring the work to another queue
 /// would read freed memory.
 public enum PayloadInspector {
+    /// Reads one packet.
+    ///
+    /// `capturePayload` is the `--read-cleartext` flag reaching the hot path. When it is
+    /// false — the default, and every run that has ever existed before this — no bytes are
+    /// copied and behaviour is exactly what it was: names, and nothing else.
     public static func inspect(
         packet: ParsedPacket,
-        payload: UnsafeRawBufferPointer
-    ) -> NameObservation? {
+        payload: UnsafeRawBufferPointer,
+        capturePayload: Bool
+    ) -> PacketObservation? {
         guard !payload.isEmpty else { return nil }
+
+        var observation = PacketObservation()
+        let findings = ProtocolSniffer.read(packet: packet, payload: payload)
+        observation.reading = findings.reading
 
         switch packet.transport {
         case .udp:
-            // Ordinary DNS, multicast DNS, and Apple's local resolver port.
-            let dnsPorts: Set<UInt16> = [53, 5353]
-            guard
-                dnsPorts.contains(packet.sourcePort)
-                    || dnsPorts.contains(packet.destinationPort)
-            else { return nil }
-            return DNSMessage.parseResponse(payload).map(NameObservation.dnsAnswer)
+            // Recognising a packet as DNS *is* parsing it, so the sniffer already did the
+            // work — question section, answer records, compression pointers and all. Taking
+            // the answer it hands back is what keeps this to one pass over the buffer.
+            observation.name = findings.dnsAnswer.map(NameObservation.dnsAnswer)
 
         case .tcp:
             // DNS over TCP is length-prefixed; the ClientHello is not. Only the latter is
             // worth chasing, since large DNS answers over TCP are rare on a client.
-            guard let name = TLSClientHello.serverName(in: payload) else { return nil }
-            return .serverName(name)
+            if let name = TLSClientHello.serverName(in: payload) {
+                observation.name = .serverName(name)
+            }
 
         default:
-            return nil
+            break
         }
+
+        if capturePayload, shouldCopy(observation.reading) {
+            observation.excerptBytes = PayloadExcerpt.copy(from: payload)
+            observation.payloadBytesSeen = payload.count
+        }
+
+        return observation.isEmpty ? nil : observation
+    }
+
+    /// The gate that keeps payload copying off the hot path.
+    ///
+    /// A packet is copied unless it was *read* as encrypted. That is a three-byte
+    /// comparison for TLS, which is the overwhelming majority of a real machine's traffic,
+    /// so almost nothing is copied on a normal system.
+    ///
+    /// Note what does *not* exempt a packet: an `encrypted` reading resting only on the
+    /// port. Port 443 is the internet's junk drawer, and skipping its payload would mean
+    /// the one thing worth catching — something plaintext on a port that promises
+    /// otherwise — is the one thing never looked at.
+    ///
+    /// A nil reading means the protocol has no ports at all — ICMP and friends. Those are
+    /// not copied: with no ports there is no connection to characterise, so `security`
+    /// stays nil, and the Cleartext view has nothing it could show. Copying them anyway
+    /// spent the bounded 64-flow buffer and the per-snapshot byte budget on payload that
+    /// could never be displayed, evicting the cleartext connections the buffer is for.
+    private static func shouldCopy(_ reading: ProtocolSniffer.Reading?) -> Bool {
+        guard let reading else { return false }
+        return !(reading.security == .encrypted && reading.evidence == .payload)
     }
 }
