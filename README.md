@@ -14,6 +14,21 @@ Requires macOS 14+ and Xcode's Swift toolchain. Nothing else — no Apple Develo
 no third-party packages. `make help` lists every target; `make check` builds, runs the 101
 tests and exercises the daemon's socket without needing root.
 
+For the full setup — the optional databases, continuous capture, the MCP server — there is
+a wizard that asks about each piece in the order the answers depend on each other, and does
+nothing it did not ask about first:
+
+```bash
+make wizard       # install or update, one decision at a time
+make reload       # after editing code: rebuild and restart whatever is running
+```
+
+Neither replaces the individual targets below; both are made of them. `make reload` is the
+one to reach for during development, and it exists because **`make restart` restarts the
+installed daemon, which is a copy taken at install time** — after an edit it faithfully
+restarts the old binary. Updating and restarting are different operations; `reload` does
+both, and touches only what was already running.
+
 ## Why not just do what Little Snitch does?
 
 Little Snitch uses a Network System Extension built on `NEFilterDataProvider`. That
@@ -469,6 +484,10 @@ make install     # asks for your password
 make status
 make uninstall
 ```
+
+`make wizard` reaches the same place while explaining each step, and re-running it is the
+update path. Whichever you use, `make reload` is what puts a code change into the running
+daemon afterwards: it reinstalls the binary and only then kickstarts the job.
 
 This is what makes history worth having. A database that only fills while you are watching
 answers the same questions the live view already does; one that filled while you were not

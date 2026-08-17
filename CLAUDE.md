@@ -21,7 +21,28 @@ make run            # build both halves, start the daemon, open the app
 make serve          # capture and publish, drawing nothing
 make top            # live connection table in the terminal
 make stop
+make reload         # rebuild, then restart whatever is already running
+make wizard         # install or update, asking about each piece
 ```
+
+`make reload` (`Scripts/reload.sh`) is the after-an-edit command, and the reason it is not
+`make restart` matters: the launchd job runs `/usr/local/libexec/beholderd`, a **copy taken
+at install time**, so `restart` kickstarts the old binary and the change appears not to
+have worked. `reload` reinstalls the binary first, quits and reopens the app around the
+bundle rebuild, and restarts only what was already running — it installs nothing new. It
+follows the installed configuration (release when a daemon is installed, debug otherwise)
+and ignores the Makefile's `CONFIG`; `BEHOLDER_CONFIG` overrides, the same name
+`install-daemon.sh` takes. `make wizard` (`Scripts/wizard.sh`) is the opposite end:
+interactive, re-runnable as the update path, and it asks before every step. Neither
+replaces the individual targets; both are composed of them, so a change to
+`install-daemon.sh`, `install-mcp.sh` or `fetch-*.sh` is picked up by both.
+
+`reload` deliberately does **not** delegate the daemon swap to `install-daemon.sh`: that
+replaces the job by `bootout`/`bootstrap`, which for an unsigned daemon can land back in
+the "registered but never started, waiting for Login Items approval" state `doctor.sh`
+exists to diagnose. `kickstart -k` keeps the job registered. The cost is that the plist is
+not rewritten, so `reload` warns when `install-daemon.sh` is newer than the installed
+plist and points at `make install`.
 
 Needing no root — use these when iterating:
 

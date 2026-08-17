@@ -13,6 +13,26 @@ LOGS   := logs
 
 .DEFAULT_GOAL := help
 
+# ------------------------------------------------------------- setting up and updating
+#
+# Two entry points that stand in front of everything below. `wizard` is the one that adds
+# or removes pieces, and asks before each; `reload` is the one to run after editing code,
+# which asks nothing and installs nothing — it rebuilds and restarts what is already
+# there. Neither replaces the individual targets; both are made of them.
+#
+# Both choose their own configuration and ignore CONFIG, unlike every other target here:
+# what they build has to match what is already installed, which they can see and a
+# variable default cannot. Override with BEHOLDER_CONFIG, the same name install-daemon.sh
+# has always used.
+
+.PHONY: wizard
+wizard: ## Install or update, asking about each piece (run this first)
+	./Scripts/wizard.sh
+
+.PHONY: reload
+reload: ## Rebuild and restart everything that is running (run this after editing)
+	./Scripts/reload.sh
+
 # ---------------------------------------------------------------------------- build
 
 .PHONY: build
@@ -118,7 +138,10 @@ doctor: ## Diagnose why the app cannot see the daemon
 	@./Scripts/doctor.sh || true
 
 .PHONY: restart
-restart: ## (root) Restart the installed daemon
+restart: ## (root) Restart the installed daemon as it is — see 'reload' after an edit
+	@# This restarts /usr/local/libexec/beholderd, which is a copy taken at install time.
+	@# After editing code you want 'reload', which replaces that copy first; this target
+	@# would faithfully restart the old build.
 	sudo launchctl kickstart -k system/com.beholder.daemon
 	@sleep 1
 	@$(MAKE) --no-print-directory doctor
@@ -157,20 +180,9 @@ mcp-add: mcp ## Print the command that registers the MCP server with Claude
 
 .PHONY: mcp-install
 mcp-install: mcp ## (root) Install the MCP server to /usr/local/libexec
-	sudo install -m 755 $(BUILD)/BeholderMCP /usr/local/libexec/beholder-mcp
-	@echo
-	@echo "Installed to /usr/local/libexec/beholder-mcp."
-	@echo
-	@# `claude mcp add` refuses rather than replaces when the name is taken, and the
-	@# common path here is re-pointing an existing registration from the .build copy to
-	@# this one — so lead with the remove. It is harmless when nothing is registered.
-	@echo "Point your assistant at it by running:"
-	@echo
-	@echo "  claude mcp remove beholder 2>/dev/null; \\"
-	@echo "  claude mcp add beholder -- /usr/local/libexec/beholder-mcp"
-	@echo
-	@echo "Registering this copy rather than the one under .build means 'make clean'"
-	@echo "cannot leave the registration pointing at a binary that is no longer there."
+	@# The install and the registration guidance live in the script, not here, so that
+	@# the wizard and reload print the same advice rather than their own copy of it.
+	sudo env BEHOLDER_CONFIG=$(CONFIG) BEHOLDER_SKIP_BUILD=1 ./Scripts/install-mcp.sh
 
 .PHONY: test-mcp
 test-mcp: mcp ## Check the MCP server's stdout carries nothing but protocol
