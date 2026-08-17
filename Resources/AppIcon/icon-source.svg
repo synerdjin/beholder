@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="46%" r="75%">
+      <stop offset="0%" stop-color="#0e2426"/>
+      <stop offset="60%" stop-color="#081415"/>
+      <stop offset="100%" stop-color="#04090a"/>
+    </radialGradient>
+    <radialGradient id="orb" cx="42%" cy="38%" r="70%">
+      <stop offset="0%" stop-color="#123336"/>
+      <stop offset="70%" stop-color="#081b1c"/>
+      <stop offset="100%" stop-color="#051213"/>
+    </radialGradient>
+    <radialGradient id="iris" cx="45%" cy="42%" r="65%">
+      <stop offset="0%" stop-color="#7dedd8"/>
+      <stop offset="55%" stop-color="#2dd4bf"/>
+      <stop offset="100%" stop-color="#0f7a6e"/>
+    </radialGradient>
+    <clipPath id="squircle">
+      <rect x="0" y="0" width="1024" height="1024" rx="176" ry="176"/>
+    </clipPath>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="9" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <g clip-path="url(#squircle)">
+    <rect x="0" y="0" width="1024" height="1024" fill="url(#bg)"/>
+
+    <g filter="url(#glow)" fill="none" stroke="#2dd4bf" stroke-width="7" stroke-linecap="round">
+      <!-- eyestalks, fanning from the top of the body -->
+      <path d="M338,404 Q224,278 162,182"/>
+      <path d="M392,344 Q308,214 276,132"/>
+      <path d="M460,312 Q416,182 404,100"/>
+      <path d="M512,300 Q512,170 512,84"/>
+      <path d="M564,312 Q608,182 620,100"/>
+      <path d="M632,344 Q716,214 748,132"/>
+      <path d="M686,404 Q800,278 862,182"/>
+
+      <!-- small stalk eyes -->
+      <circle cx="162" cy="182" r="19" stroke-width="6"/>
+      <circle cx="276" cy="132" r="17" stroke-width="6"/>
+      <circle cx="404" cy="100" r="16" stroke-width="6"/>
+      <circle cx="512" cy="84"  r="17" stroke-width="6"/>
+      <circle cx="620" cy="100" r="16" stroke-width="6"/>
+      <circle cx="748" cy="132" r="17" stroke-width="6"/>
+      <circle cx="862" cy="182" r="19" stroke-width="6"/>
+    </g>
+
+    <g fill="#04100f">
+      <circle cx="162" cy="182" r="8"/>
+      <circle cx="276" cy="132" r="7"/>
+      <circle cx="404" cy="100" r="6.5"/>
+      <circle cx="512" cy="84"  r="7"/>
+      <circle cx="620" cy="100" r="6.5"/>
+      <circle cx="748" cy="132" r="7"/>
+      <circle cx="862" cy="182" r="8"/>
+    </g>
+
+    <!-- body -->
+    <g filter="url(#glow)">
+      <circle cx="512" cy="572" r="238" fill="url(#orb)" stroke="#2dd4bf" stroke-width="8"/>
+      <path d="M330,440 A238,238 0 0 1 660,392" fill="none" stroke="#5eead4" stroke-width="5" opacity="0.55" stroke-linecap="round"/>
+    </g>
+
+    <!-- mouth: a jagged row of teeth along the lower rim -->
+    <g fill="none" stroke="#2dd4bf" stroke-width="6" stroke-linejoin="round" stroke-linecap="round" filter="url(#glow)">
+      <path d="M368,742
+               L392,706 L416,742
+               L440,700 L464,742
+               L488,696 L512,742
+               L536,696 L560,742
+               L584,700 L608,742
+               L632,706 L656,742"/>
+    </g>
+
+    <!-- central eye -->
+    <g filter="url(#glow)">
+      <circle cx="512" cy="560" r="112" fill="#040d0e" stroke="#2dd4bf" stroke-width="8"/>
+      <circle cx="512" cy="560" r="72" fill="url(#iris)"/>
+      <circle cx="512" cy="560" r="30" fill="#03100f"/>
+      <circle cx="490" cy="538" r="11" fill="#c9fff4" opacity="0.85"/>
+    </g>
+  </g>
+</svg>
