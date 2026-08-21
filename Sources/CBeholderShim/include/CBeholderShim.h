@@ -33,6 +33,12 @@
 // Historical storage
 #include <sqlite3.h>
 
+// Undoing HTTP content encodings. zlib ships with the system, so this stays inside the
+// no-dependencies rule for the same reason sqlite3 does: it is part of the platform, not
+// a package. It is here rather than imported directly because Swift has no module for it
+// on macOS, and this shim is already where system headers are re-exported.
+#include <zlib.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif

@@ -185,13 +185,19 @@ struct MCPProtocolTests {
 
     // MARK: - The real toolbox
 
-    @Test("The tool surface is exactly the four documented tools")
+    @Test("The tool surface is exactly the five documented tools")
     func toolNamesArePinned() {
         // Pinned deliberately. A rename silently breaks every saved conversation and every
         // habit a user has built, so it should take a failing test to do it.
+        //
+        // The count is pinned as much as the names. Every tool's schema sits in the
+        // client's context on every turn of every conversation, so growth here is a cost
+        // paid by people who never ask about networking at all — see the note at the top
+        // of MCPTools for why the fifth was judged to earn its place.
         #expect(
             MCPToolbox.definitions.map(\.name) == [
                 "network_history", "endpoint_lookup", "live_connections", "beholder_status",
+                "network_quality",
             ]
         )
     }

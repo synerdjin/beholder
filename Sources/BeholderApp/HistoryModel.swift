@@ -12,30 +12,9 @@ import Observation
 @Observable
 final class HistoryModel {
 
-    enum Range: String, CaseIterable, Identifiable {
-        case hour = "Last hour"
-        case day = "Last 24 hours"
-        case week = "Last 7 days"
-        case month = "Last 30 days"
-
-        var id: String { rawValue }
-
-        var duration: TimeInterval {
-            switch self {
-            case .hour: return 3600
-            case .day: return 86400
-            case .week: return 7 * 86400
-            case .month: return 30 * 86400
-            }
-        }
-    }
-
-    enum State: Equatable {
-        case idle
-        case loading
-        case loaded
-        case unavailable(String)
-    }
+    typealias Range = HistoryReading.Range
+    typealias State = HistoryReading.State
+    static let ranges: [Range] = Range.allCases
 
     private(set) var state: State = .idle
     private(set) var totals: [ProcessTotal] = []
@@ -91,45 +70,16 @@ final class HistoryModel {
         let coverage: (earliest: Date, latest: Date)?
     }
 
-    /// A plain two-case outcome rather than `Result`, whose failure type must be an
-    /// `Error` — here the failure is a sentence for the user, not a thrown condition.
-    private enum Outcome {
-        case success(Loaded)
-        case failure(String)
-    }
-
     private static func query(
         range: Range, search: String?, on queue: DispatchQueue?
-    ) async -> Outcome {
-        guard let queue else { return .failure("Not ready.") }
-
-        return await withCheckedContinuation { continuation in
-            queue.async {
-                let path = BeholderPaths.historyDatabase()
-                guard FileManager.default.fileExists(atPath: path) else {
-                    // Not an error. Capture writes history as connections finish, so an
-                    // absent database simply means nothing has been recorded yet.
-                    continuation.resume(returning: .failure("No history has been recorded yet."))
-                    return
-                }
-
-                do {
-                    let store = try FlowStore(path: path, readOnly: true)
-                    defer { store.close() }
-
-                    let since = Date().addingTimeInterval(-range.duration)
-                    let loaded = Loaded(
-                        totals: try store.processTotals(since: since),
-                        flows: try store.flows(
-                            since: since, matching: search, limit: flowLimit
-                        ),
-                        coverage: try store.coverage()
-                    )
-                    continuation.resume(returning: .success(loaded))
-                } catch {
-                    continuation.resume(returning: .failure("\(error)"))
-                }
-            }
+    ) async -> HistoryReading.Outcome<Loaded> {
+        await HistoryReading.read(on: queue) { store in
+            let since = Date().addingTimeInterval(-range.duration)
+            return Loaded(
+                totals: try store.processTotals(since: since),
+                flows: try store.flows(since: since, matching: search, limit: flowLimit),
+                coverage: try store.coverage()
+            )
         }
     }
 
@@ -139,7 +89,6 @@ final class HistoryModel {
     /// Whether the window asked for reaches further back than anything recorded. Saying
     /// so is what stops a short history reading as a quiet month.
     var windowExceedsCoverage: Bool {
-        guard let coverage else { return false }
-        return coverage.earliest > Date().addingTimeInterval(-range.duration)
+        HistoryReading.windowExceedsCoverage(earliest: coverage?.earliest, range: range)
     }
 }

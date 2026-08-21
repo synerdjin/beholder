@@ -21,15 +21,6 @@ enum Column {
         right(String(value), width)
     }
 }
-
-/// Counts with a correctly pluralised noun. "1 connections" is the kind of small
-/// wrongness that makes a tool feel unfinished, and it shows up wherever a count that is
-/// usually large happens to be one.
-func pluralised(_ count: some BinaryInteger, _ singular: String, plural: String? = nil) -> String {
-    let noun = count == 1 ? singular : (plural ?? singular + "s")
-    return "\(count) \(noun)"
-}
-
 /// Full local date, time and zone.
 ///
 /// Reports get copied out of a terminal and read days later, often alongside a commit

@@ -142,6 +142,7 @@ private enum Presentation: String, CaseIterable, Identifiable {
     case connections = "Connections"
     case cleartext = "Cleartext"
     case map = "Map"
+    case quality = "Quality"
     case history = "History"
     var id: String { rawValue }
 
@@ -150,6 +151,7 @@ private enum Presentation: String, CaseIterable, Identifiable {
         case .connections: return "list.bullet"
         case .cleartext: return "lock.open"
         case .map: return "globe"
+        case .quality: return "speedometer"
         case .history: return "clock.arrow.circlepath"
         }
     }
@@ -161,6 +163,7 @@ private struct MainView: View {
     @State private var grouping: Grouping = .process
     @State private var unidentifiedOnly = false
     @State private var history = HistoryModel()
+    @State private var quality = QualityModel()
     @State private var exposedSelection: WireFlow.ID?
 
     var body: some View {
@@ -171,6 +174,18 @@ private struct MainView: View {
                 HistoryHeader(presentation: $presentation)
                 Divider()
                 HistoryView(model: history)
+            } else if presentation == .quality, client.snapshot == nil {
+                // Quality is half live and half recorded. With no daemon the recorded half
+                // is still worth reading, so this screen is not sent to the waiting view
+                // wholesale — it shows the wait inside its own Live half instead.
+                HistoryHeader(presentation: $presentation)
+                Divider()
+                QualityView(
+                    snapshot: nil,
+                    history: client.history,
+                    model: quality,
+                    waitingState: client.state
+                )
             } else if let snapshot = client.snapshot {
                 HeaderView(
                     snapshot: snapshot,
@@ -196,6 +211,13 @@ private struct MainView: View {
                     CleartextView(snapshot: snapshot, selection: $exposedSelection)
                 case .map:
                     ConnectionMapView(snapshot: snapshot)
+                case .quality:
+                    QualityView(
+                        snapshot: snapshot,
+                        history: client.history,
+                        model: quality,
+                        waitingState: client.state
+                    )
                 case .history:
                     // Handled above; history needs no live snapshot.
                     EmptyView()
@@ -238,7 +260,7 @@ private struct HistoryHeader: View {
 /// launch rather than a fault. The screen therefore explains rather than apologises, and
 /// gives exactly one command to run — an earlier version stated the problem twice and
 /// offered two subtly different commands, which is worse than saying nothing.
-private struct WaitingView: View {
+struct WaitingView: View {
     let state: FlowClient.State
 
     /// The app bundle lives at `<project>/.build/Beholder.app`, so the project root is
@@ -394,7 +416,7 @@ private struct HeaderView: View {
     }
 }
 
-private struct ThroughputChart: View {
+struct ThroughputChart: View {
     let history: [FlowClient.ThroughputSample]
 
     var body: some View {

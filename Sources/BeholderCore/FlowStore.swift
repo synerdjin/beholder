@@ -20,6 +20,7 @@ public final class FlowStore {
         case cannotOpen(path: String, message: String)
         case migrationFailed(String)
         case statementFailed(String)
+        case schemaTooNew(found: Int32, supported: Int32)
 
         public var description: String {
             switch self {
@@ -29,6 +30,12 @@ public final class FlowStore {
                 return "cannot prepare the flow database: \(message)"
             case .statementFailed(let message):
                 return "database error: \(message)"
+            case .schemaTooNew(let found, let supported):
+                return """
+                    the history database was written by a newer Beholder (schema \(found), \
+                    this build understands \(supported)). Update Beholder, or move the \
+                    database aside to start a new one.
+                    """
             }
         }
     }
@@ -38,6 +45,12 @@ public final class FlowStore {
         /// forever. Rollups are tiny and keep the long view.
         public var flowDays = 30
         public var rollupDays = 365
+        /// Per-minute quality is the bulky part of the time series, so it keeps the same
+        /// window as individual flows. Older minutes are folded into hours before being
+        /// deleted, which is what keeps a year of trend available without a year of rows.
+        public var qualityMinuteDays = 30
+        public var qualityHourDays = 365
+        public var probeDays = 90
         public init() {}
     }
 
@@ -106,62 +119,191 @@ public final class FlowStore {
 
     // MARK: - Schema
 
+    /// The schema version this build understands, which is the last entry in `migrations`.
+    public static let schemaVersion: Int32 = 2
+
+    /// Ordered and append-only.
+    ///
+    /// Each step runs exactly once, inside a transaction that also bumps `user_version`,
+    /// so an interrupted upgrade leaves the database at the last version that completed
+    /// rather than part-way through one.
+    ///
+    /// Never edit a shipped step. A database in the field has already run it, so an edit
+    /// only ever reaches new databases — which quietly gives two files the same version
+    /// number and different shapes, the worst outcome available here. Append instead.
+    ///
+    /// Step 1 is the original schema verbatim. Databases written before versioning report
+    /// version 0 but already have these tables, so `IF NOT EXISTS` makes the step a no-op
+    /// for them and they adopt version 1 with nothing touched.
+    private static let migrations: [(version: Int32, statements: [String])] = [
+        (
+            1,
+            [
+                """
+                CREATE TABLE IF NOT EXISTS flows (
+                    id INTEGER PRIMARY KEY,
+                    first_seen REAL NOT NULL,
+                    last_seen REAL NOT NULL,
+                    transport TEXT NOT NULL,
+                    local_address TEXT NOT NULL,
+                    local_port INTEGER NOT NULL,
+                    remote_address TEXT NOT NULL,
+                    remote_port INTEGER NOT NULL,
+                    host_name TEXT,
+                    host_name_source TEXT,
+                    process_name TEXT,
+                    process_path TEXT,
+                    pid INTEGER,
+                    bytes_out INTEGER NOT NULL,
+                    bytes_in INTEGER NOT NULL,
+                    packets_out INTEGER NOT NULL,
+                    packets_in INTEGER NOT NULL,
+                    direction TEXT NOT NULL,
+                    country TEXT,
+                    city TEXT,
+                    network_operator TEXT,
+                    owner_company TEXT,
+                    interface TEXT NOT NULL
+                );
+                """,
+                "CREATE INDEX IF NOT EXISTS flows_last_seen ON flows(last_seen);",
+                "CREATE INDEX IF NOT EXISTS flows_process ON flows(process_path);",
+                "CREATE INDEX IF NOT EXISTS flows_remote ON flows(remote_address);",
+                "CREATE INDEX IF NOT EXISTS flows_host ON flows(host_name);",
+                """
+                CREATE TABLE IF NOT EXISTS rollups (
+                    minute INTEGER NOT NULL,
+                    process_path TEXT NOT NULL,
+                    process_name TEXT,
+                    bytes_out INTEGER NOT NULL,
+                    bytes_in INTEGER NOT NULL,
+                    flow_count INTEGER NOT NULL,
+                    PRIMARY KEY (minute, process_path)
+                );
+                """,
+                "CREATE INDEX IF NOT EXISTS rollups_minute ON rollups(minute);",
+            ]
+        ),
+        (
+            2,
+            [
+                """
+                CREATE TABLE IF NOT EXISTS quality_minutes (
+                    minute INTEGER NOT NULL,
+                    interface TEXT NOT NULL,
+                    destination_group TEXT NOT NULL,
+                    destination_label TEXT,
+                    rtt_samples INTEGER NOT NULL,
+                    rtt_min_ms REAL,
+                    rtt_p50_ms REAL,
+                    rtt_p95_ms REAL,
+                    handshake_samples INTEGER NOT NULL,
+                    handshake_min_ms REAL,
+                    segments_out INTEGER NOT NULL,
+                    segments_in INTEGER NOT NULL,
+                    retransmits_out INTEGER NOT NULL,
+                    retransmits_in INTEGER NOT NULL,
+                    bytes_out INTEGER NOT NULL,
+                    bytes_in INTEGER NOT NULL,
+                    measured_bytes INTEGER NOT NULL,
+                    unmeasurable_bytes INTEGER NOT NULL,
+                    flow_count INTEGER NOT NULL,
+                    connection_attempts INTEGER NOT NULL,
+                    connection_timeouts INTEGER NOT NULL,
+                    PRIMARY KEY (minute, interface, destination_group)
+                );
+                """,
+                "CREATE INDEX IF NOT EXISTS quality_minutes_minute ON quality_minutes(minute);",
+                """
+                CREATE TABLE IF NOT EXISTS quality_hours (
+                    hour INTEGER NOT NULL,
+                    interface TEXT NOT NULL,
+                    destination_group TEXT NOT NULL,
+                    destination_label TEXT,
+                    rtt_samples INTEGER NOT NULL,
+                    rtt_min_ms REAL,
+                    segments_out INTEGER NOT NULL,
+                    segments_in INTEGER NOT NULL,
+                    retransmits_out INTEGER NOT NULL,
+                    retransmits_in INTEGER NOT NULL,
+                    bytes_out INTEGER NOT NULL,
+                    bytes_in INTEGER NOT NULL,
+                    measured_bytes INTEGER NOT NULL,
+                    unmeasurable_bytes INTEGER NOT NULL,
+                    connection_attempts INTEGER NOT NULL,
+                    connection_timeouts INTEGER NOT NULL,
+                    PRIMARY KEY (hour, interface, destination_group)
+                );
+                """,
+                "CREATE INDEX IF NOT EXISTS quality_hours_hour ON quality_hours(hour);",
+                """
+                CREATE TABLE IF NOT EXISTS quality_probes (
+                    at REAL NOT NULL,
+                    interface TEXT NOT NULL,
+                    target TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    rtt_ms REAL,
+                    PRIMARY KEY (at, target)
+                );
+                """,
+                "CREATE INDEX IF NOT EXISTS quality_probes_at ON quality_probes(at);",
+            ]
+        ),
+    ]
+
     private func migrate() throws {
         // WAL so a query never blocks capture; NORMAL synchronous because losing the last
         // few seconds of history to a power cut is not worth an fsync per transaction.
-        let statements = [
-            "PRAGMA journal_mode = WAL;",
-            "PRAGMA synchronous = NORMAL;",
-            """
-            CREATE TABLE IF NOT EXISTS flows (
-                id INTEGER PRIMARY KEY,
-                first_seen REAL NOT NULL,
-                last_seen REAL NOT NULL,
-                transport TEXT NOT NULL,
-                local_address TEXT NOT NULL,
-                local_port INTEGER NOT NULL,
-                remote_address TEXT NOT NULL,
-                remote_port INTEGER NOT NULL,
-                host_name TEXT,
-                host_name_source TEXT,
-                process_name TEXT,
-                process_path TEXT,
-                pid INTEGER,
-                bytes_out INTEGER NOT NULL,
-                bytes_in INTEGER NOT NULL,
-                packets_out INTEGER NOT NULL,
-                packets_in INTEGER NOT NULL,
-                direction TEXT NOT NULL,
-                country TEXT,
-                city TEXT,
-                network_operator TEXT,
-                owner_company TEXT,
-                interface TEXT NOT NULL
-            );
-            """,
-            "CREATE INDEX IF NOT EXISTS flows_last_seen ON flows(last_seen);",
-            "CREATE INDEX IF NOT EXISTS flows_process ON flows(process_path);",
-            "CREATE INDEX IF NOT EXISTS flows_remote ON flows(remote_address);",
-            "CREATE INDEX IF NOT EXISTS flows_host ON flows(host_name);",
-            """
-            CREATE TABLE IF NOT EXISTS rollups (
-                minute INTEGER NOT NULL,
-                process_path TEXT NOT NULL,
-                process_name TEXT,
-                bytes_out INTEGER NOT NULL,
-                bytes_in INTEGER NOT NULL,
-                flow_count INTEGER NOT NULL,
-                PRIMARY KEY (minute, process_path)
-            );
-            """,
-            "CREATE INDEX IF NOT EXISTS rollups_minute ON rollups(minute);",
-        ]
+        // Both are properties of the connection rather than of the schema, so they are set
+        // on every open instead of inside a versioned step. WAL in particular cannot run
+        // inside a transaction, which is the other reason it stays out here.
+        try execute("PRAGMA journal_mode = WAL;")
+        try execute("PRAGMA synchronous = NORMAL;")
 
-        for statement in statements {
-            guard sqlite3_exec(handle, statement, nil, nil, nil) == SQLITE_OK else {
-                throw StoreError.migrationFailed(errorMessage)
+        let current = try userVersion()
+
+        // A database from a newer Beholder may carry tables and columns this build knows
+        // nothing about. Reading it would mostly work, which is exactly the problem: the
+        // failure would surface as quietly absent data rather than as an error. Refuse it,
+        // for the same reason WireProtocol.version refuses a snapshot it cannot decode.
+        guard current <= Self.schemaVersion else {
+            throw StoreError.schemaTooNew(found: current, supported: Self.schemaVersion)
+        }
+
+        for step in Self.migrations where step.version > current {
+            try execute("BEGIN IMMEDIATE;")
+            do {
+                for statement in step.statements {
+                    guard sqlite3_exec(handle, statement, nil, nil, nil) == SQLITE_OK else {
+                        throw StoreError.migrationFailed(errorMessage)
+                    }
+                }
+                // Interpolated rather than bound because PRAGMA takes no parameters. The
+                // value is one of our own literals above and never comes from input.
+                try execute("PRAGMA user_version = \(step.version);")
+                try execute("COMMIT;")
+            } catch {
+                try? execute("ROLLBACK;")
+                throw error
             }
         }
+    }
+
+    /// The database's schema version. Zero for a database created before versioning, and
+    /// also zero for a brand-new empty one — the two are indistinguishable here and do not
+    /// need to be told apart, since step 1 is a no-op against an existing schema.
+    func userVersion() throws -> Int32 {
+        var statement: OpaquePointer?
+        guard
+            sqlite3_prepare_v2(handle, "PRAGMA user_version;", -1, &statement, nil) == SQLITE_OK
+        else {
+            throw StoreError.migrationFailed(errorMessage)
+        }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else {
+            throw StoreError.migrationFailed(errorMessage)
+        }
+        return sqlite3_column_int(statement, 0)
     }
 
     private var errorMessage: String { lastErrorMessage }
@@ -328,7 +470,9 @@ public final class FlowStore {
         return Int(sqlite3_column_int64(statement, 0))
     }
 
-    private func execute(_ sql: String) throws {
+    /// Internal rather than private because `FlowStoreQuality` runs the same statements
+    /// against the same handle, and had copied this verbatim to reach it.
+    func execute(_ sql: String) throws {
         guard sqlite3_exec(handle, sql, nil, nil, nil) == SQLITE_OK else {
             throw StoreError.statementFailed(errorMessage)
         }

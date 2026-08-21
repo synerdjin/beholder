@@ -82,7 +82,43 @@ enum Beholderd {
             print("")
         }
 
-        let monitor = needsFlows ? FlowMonitor(readCleartext: readCleartext) : nil
+        let measureQuality = options.measuresQuality
+        if !options.measureQuality, needsFlows {
+            note("not measuring round-trip time, retransmissions or jitter")
+        }
+        let monitor =
+            needsFlows
+            ? FlowMonitor(readCleartext: readCleartext, measureQuality: measureQuality) : nil
+
+        // The one thing here that is not purely passive, so it announces itself the way payload
+        // reading does — before anything happens, not in a log nobody reads afterwards.
+        let probing = options.probes
+        if options.probe, !probing {
+            note("--probe has no effect without --serve or --top, or with --no-history")
+        }
+        if probing, let monitor {
+            let targets =
+                options.probeTargets.isEmpty ? Prober.defaultAnchors : options.probeTargets
+            let instance = Prober(
+                interval: options.probeInterval,
+                anchors: targets,
+                record: { [weak monitor] results in monitor?.recordProbes(results) }
+            )
+
+            print("Sending probes. Beholder is no longer only watching:")
+            let named = instance.currentTargets().map {
+                "\($0.address)\($0.kind == .gateway ? " (gateway)" : "")"
+            }
+            print(
+                "every \(Int(options.probeInterval))s, one ICMP echo to "
+                    + named.joined(separator: ", "))
+            print("Nothing else is sent, and no traffic of anyone else's is altered.")
+            print("")
+
+            // Started by the monitor, which also owns it: it must be cancelled before the store
+            // closes, and a local here would not survive dispatchMain().
+            monitor.attach(prober: instance)
+        }
         let packetHandler: PacketSink
         if let monitor {
             packetHandler = monitor.packetHandler()

@@ -137,21 +137,24 @@ public enum DNSMessage {
     }
 
     // MARK: Bounds-checked reads
+    //
+    // Internal rather than private because `DNSPreview` walks the same wire format and
+    // must read it the same way. Two copies would be two chances to get a bound wrong.
 
     @inline(__always)
-    private static func uint16(_ buffer: UnsafeRawBufferPointer, _ offset: Int) -> UInt16? {
+    static func uint16(_ buffer: UnsafeRawBufferPointer, _ offset: Int) -> UInt16? {
         guard offset >= 0, offset + 2 <= buffer.count else { return nil }
         return UInt16(bigEndian: buffer.loadUnaligned(fromByteOffset: offset, as: UInt16.self))
     }
 
     @inline(__always)
-    private static func uint32(_ buffer: UnsafeRawBufferPointer, _ offset: Int) -> UInt32? {
+    static func uint32(_ buffer: UnsafeRawBufferPointer, _ offset: Int) -> UInt32? {
         guard offset >= 0, offset + 4 <= buffer.count else { return nil }
         return UInt32(bigEndian: buffer.loadUnaligned(fromByteOffset: offset, as: UInt32.self))
     }
 
     @inline(__always)
-    private static func uint32Raw(_ buffer: UnsafeRawBufferPointer, _ offset: Int) -> UInt32? {
+    static func uint32Raw(_ buffer: UnsafeRawBufferPointer, _ offset: Int) -> UInt32? {
         guard offset >= 0, offset + 4 <= buffer.count else { return nil }
         return buffer.loadUnaligned(fromByteOffset: offset, as: UInt32.self)
     }

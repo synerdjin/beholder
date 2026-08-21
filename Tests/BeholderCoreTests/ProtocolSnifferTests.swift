@@ -10,7 +10,8 @@ private let localAddresses: Set<IPAddress> = [laptop]
 private func packet(
     transport: TransportProtocol = .tcp,
     localPort: UInt16 = 51234,
-    remotePort: UInt16
+    remotePort: UInt16,
+    truePayloadLength: Int = 0
 ) -> ParsedPacket {
     ParsedPacket(
         transport: transport,
@@ -22,18 +23,24 @@ private func packet(
         wireBytes: 1000,
         isFragment: false,
         payloadOffset: 0,
-        payloadCapturedLength: 0
+        payloadCapturedLength: 0,
+        transportPayloadLength: truePayloadLength
     )
 }
 
 private func read(
     _ bytes: [UInt8],
     transport: TransportProtocol = .tcp,
-    remotePort: UInt16 = 51999
+    remotePort: UInt16 = 51999,
+    truePayloadLength: Int = 0
 ) -> ProtocolSniffer.Reading? {
     bytes.withUnsafeBytes { buffer in
         ProtocolSniffer.read(
-            packet: packet(transport: transport, remotePort: remotePort),
+            packet: packet(
+                transport: transport,
+                remotePort: remotePort,
+                truePayloadLength: truePayloadLength
+            ),
             payload: buffer
         ).reading
     }
@@ -168,6 +175,94 @@ struct ProtocolSnifferTests {
         #expect(reading.evidence == .payload)
     }
 
+    // MARK: - WireGuard
+
+    /// Captured from a live NordLynx tunnel, which is WireGuard: the first datagram of the
+    /// loopback conversation between `com.nordvpn.macos.helper` and the userspace tunnel.
+    /// A synthesised fixture would have proved only that the check matches what the check
+    /// was written against.
+    private static let realTransportData: [UInt8] = [
+        0x04, 0x00, 0x00, 0x00, 0x82, 0x00, 0x00, 0x00,
+        0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0xea, 0x32, 0x8d, 0x22, 0x58, 0xd1, 0xfc, 0x81,
+        0xf3, 0xda, 0xb2, 0xf3, 0x46, 0x7c, 0x15, 0xd9,
+        0xff, 0xd5, 0x77, 0x67, 0x23, 0x7d, 0x75, 0x9b,
+        0x63, 0x42, 0xfb, 0x94, 0x95, 0x6a, 0x08, 0x99,
+        0x68, 0x04, 0xea, 0x32, 0x5d, 0x9c, 0x16, 0xea,
+        0xa7, 0x20, 0x3b, 0x5b, 0x4a, 0xe7, 0xac, 0x11,
+        0xd7, 0x25, 0x72, 0x9e, 0x89, 0x8f, 0xa5, 0xb3,
+        0xb3, 0xd1, 0xa9, 0x9b, 0x66, 0x21, 0x7e, 0xaa,
+        0x92, 0x64, 0x46, 0xe9, 0x11, 0x23, 0x91, 0x69,
+        0x56, 0x8c, 0x16, 0x1d, 0xa6, 0x83, 0x8d, 0x5a,
+    ]
+
+    /// A WireGuard message of `type`, padded to `length` — the length is the whole point of
+    /// the check, so the fixture has to be able to get it wrong.
+    private func wireGuardMessage(type: UInt8, length: Int) -> [UInt8] {
+        var bytes: [UInt8] = [type, 0, 0, 0]
+        bytes += (4..<length).map { UInt8($0 % 251) }
+        return bytes
+    }
+
+    @Test("A WireGuard transport-data message is read as encrypted")
+    func wireGuardTransportData() throws {
+        let reading = try #require(
+            read(Self.realTransportData, transport: .udp, remotePort: 53728)
+        )
+        #expect(reading.security == .encrypted)
+        #expect(reading.protocolName == "WireGuard")
+        #expect(reading.evidence == .payload, "the framing was read, not guessed from a port")
+    }
+
+    /// The shortest legal transport-data message: a 16-byte header and a bare Poly1305 tag
+    /// over an empty packet. A tunnel that is up but idle sends nothing else, so a check
+    /// that missed these would miss exactly the connections nobody is looking at.
+    @Test("A WireGuard keepalive is recognised despite carrying no packet")
+    func wireGuardKeepalive() throws {
+        let reading = try #require(
+            read(wireGuardMessage(type: 4, length: 32), transport: .udp, remotePort: 53728)
+        )
+        #expect(reading.security == .encrypted)
+        #expect(reading.protocolName == "WireGuard")
+    }
+
+    @Test("A WireGuard handshake is recognised, so a tunnel is labelled as it comes up")
+    func wireGuardHandshake() throws {
+        for (type, length) in [(UInt8(1), 148), (UInt8(2), 92), (UInt8(3), 64)] {
+            let reading = try #require(
+                read(wireGuardMessage(type: type, length: length),
+                    transport: .udp, remotePort: 51820)
+            )
+            #expect(reading.protocolName == "WireGuard", "message type \(type)")
+        }
+    }
+
+    /// The reason the length is measured off the IP header rather than the buffer. A tunnel
+    /// carrying a full-MTU packet is cut short by the 1024-byte snaplen, so measuring the
+    /// captured bytes would have failed on precisely the packets that carry the most —
+    /// leaving a busy tunnel unrecognised and its ciphertext being copied.
+    @Test("A full-MTU tunnel packet truncated by snaplen is still recognised")
+    func wireGuardSurvivesTruncation() throws {
+        let captured = wireGuardMessage(type: 4, length: 1024)
+        let reading = try #require(
+            read(captured, transport: .udp, remotePort: 53728, truePayloadLength: 1440)
+        )
+        #expect(reading.security == .encrypted)
+        #expect(reading.protocolName == "WireGuard")
+    }
+
+    /// The length check is not decoration. Without it the claim rests on one byte plus
+    /// three zeros, which a length-prefixed binary protocol can produce by accident.
+    @Test("A type-4 message of an impossible length is not claimed as WireGuard")
+    func wireGuardRejectsBadLength() throws {
+        // 100 is not 16 plus a multiple of 16, so no padded packet and tag can fill it.
+        let reading = try #require(
+            read(wireGuardMessage(type: 4, length: 100), transport: .udp, remotePort: 53728)
+        )
+        #expect(reading.security == .unknown)
+        #expect(reading.protocolName == nil)
+    }
+
     // MARK: - The honesty rule
 
     /// The regression this whole design exists around. Bytes that match nothing look
@@ -175,7 +270,12 @@ struct ProtocolSnifferTests {
     /// that was never observed — in the direction that reassures.
     @Test("Unrecognised high-entropy bytes are unknown, never encrypted")
     func unknownIsNotEncrypted() throws {
-        // WireGuard on its usual port: genuinely encrypted, but nothing here can prove it.
+        // High-entropy bytes on WireGuard's usual port, and deliberately not WireGuard:
+        // the first byte is a plausible message type, but the three reserved bytes behind
+        // it are not zero and the length fits no message. Something is encrypted here —
+        // the port says so and the entropy agrees — and neither is evidence, so the answer
+        // stays `unknown`. Recognising the real framing (above) did not soften this rule;
+        // it moved one protocol from the guessing side of it to the proving side.
         let noise: [UInt8] = [0x04, 0x9F, 0x2B, 0xE1, 0x77, 0x30, 0xCC, 0x1A, 0x5D, 0x88]
         let reading = try #require(read(noise, transport: .udp, remotePort: 51820))
         #expect(reading.security == .unknown)

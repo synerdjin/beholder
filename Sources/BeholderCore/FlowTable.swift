@@ -33,8 +33,16 @@ public final class FlowTable {
     /// non-zero value means the picture being shown is incomplete.
     public private(set) var evictedFlowCount: UInt64 = 0
 
-    public init(configuration: Configuration = Configuration()) {
+    /// Whether per-flow quality is being measured.
+    ///
+    /// Fixed for the table's lifetime rather than settable, so a run cannot end up with
+    /// some flows measured and others not — which would make every total over the table
+    /// an average of two different populations.
+    public let measuresQuality: Bool
+
+    public init(configuration: Configuration = Configuration(), measuresQuality: Bool = true) {
         self.configuration = configuration
+        self.measuresQuality = measuresQuality
     }
 
     public var count: Int { flows.count }
@@ -56,20 +64,55 @@ public final class FlowTable {
         interfaceName: String,
         localAddresses: Set<IPAddress>,
         at timestamp: Date = Date()
-    ) -> (key: FlowKey, isNew: Bool, direction: FlowDirection) {
+    ) -> Recorded {
         let (key, direction) = FlowKey.make(from: packet, localAddresses: localAddresses)
 
         let isNew = flows[key] == nil
         if isNew {
             flows[key] = Flow(key: key, interfaceName: interfaceName, at: timestamp)
         }
-        flows[key]?.record(
-            direction: direction,
-            wireBytes: packet.wireBytes,
-            tcpFlags: packet.tcpFlags,
-            at: timestamp
-        )
-        return (key, isNew, direction)
+
+        // One access, mutating in place, reading back out what the caller needs while the
+        // flow is already in hand. Asking for the group afterwards by key meant a second
+        // lookup that copied the entire `Flow` — which embeds `FlowQuality`, several
+        // strings and an owner — out of the dictionary, once per packet, to read two
+        // fields. `applyReading` below carries the same warning for the same reason.
+        var recorded = Recorded(key: key, isNew: isNew, direction: direction, quality: nil)
+        if flows[key] != nil {
+            recorded.quality = flows[key]!.record(
+                packet,
+                direction: direction,
+                at: timestamp,
+                measuringQuality: measuresQuality
+            )
+            recorded.destinationGroup = flows[key]!.destinationGroupKey
+            recorded.destinationLabel = flows[key]!.destinationGroupLabel
+            recorded.isSelfOriginated = flows[key]!.isSelfOriginated
+        }
+        return recorded
+    }
+
+    /// What one recorded packet tells its caller.
+    ///
+    /// A named value rather than a tuple: it grew past the point where positional members
+    /// read clearly, and the grouping fields exist precisely so nobody has to ask the table
+    /// a second question about a flow it has just finished touching.
+    public struct Recorded {
+        public let key: FlowKey
+        public let isNew: Bool
+        public let direction: FlowDirection
+        public var quality: QualityEvent?
+        /// The far end's grouping for the per-minute series, as it stands right now — only
+        /// as good as the enrichment that has run, since the first packets of a
+        /// conversation are filed under an address prefix until the network is named.
+        public var destinationGroup: String = ""
+        public var destinationLabel: String?
+        public var isSelfOriginated = false
+    }
+
+    /// Marks a flow as Beholder's own doing, so every reader can leave it out.
+    public func markSelfOriginated(_ key: FlowKey) {
+        flows[key]?.isSelfOriginated = true
     }
 
     /// Applies an ownership lookup to every flow that still lacks one.
@@ -166,7 +209,7 @@ public final class FlowTable {
     public func applyNetworkOperators(_ lookup: (IPAddress) -> NetworkOperator?) {
         for (key, flow) in flows where flow.networkOperator == nil {
             if let operatorInfo = lookup(flow.key.remote) {
-                flows[key]?.networkOperator = operatorInfo
+                flows[key]?.adoptNetworkOperator(operatorInfo)
             }
         }
     }
@@ -223,6 +266,16 @@ public final class FlowTable {
 
     public func activeFlows() -> [Flow] {
         Array(flows.values)
+    }
+
+    /// Visits every live flow without building an array of them.
+    ///
+    /// `activeFlows()` is right for the once-a-second snapshot, which needs the array
+    /// anyway. It is wrong for anything on the attribution timer: that fires ten times a
+    /// second, and at the 8192-flow ceiling each call copied several megabytes of `Flow`
+    /// values — plus their retains — to answer a question about a handful of them.
+    public func forEachActive(_ body: (Flow) -> Void) {
+        for flow in flows.values { body(flow) }
     }
 
     /// Live flows grouped by owning process, each group sorted by traffic volume.

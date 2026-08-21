@@ -93,6 +93,19 @@ struct WireCompatibilityTests {
         original.totalBytesIn = 16
         original.packetsCaptured = 17
         original.packetsDropped = 18
+        original.measuredFlowCount = 19
+        original.measuredByteShare = 0.20
+        original.medianRttMs = 21.5
+        original.minRttMs = 22.5
+        original.retransmitRateOut = 0.23
+        original.retransmitRateIn = 0.24
+        original.unmeasurableFlowCount = 25
+        original.unmeasurableBytes = 26
+        original.connectionAttempts = 27
+        original.connectionTimeouts = 28
+        original.connectionRefusals = 29
+        original.discardedRttSamples = 30
+        original.segmentOffloadFlowCount = 31
         original.warnings = ["a warning"]
         original.interfaceTransitions = ["en0 → utun8"]
 
@@ -209,4 +222,141 @@ struct WireCompatibilityTests {
         #expect(!flow(.encrypted).isUnprotected)
         #expect(!flow(nil).isUnprotected)
     }
+}
+
+// MARK: - Quality fields
+
+/// The quality fields were added without raising `WireProtocol.version`, on the same
+/// grounds as payload reading before them: every one is optional. The claim needs the same
+/// test, plus one the earlier fields did not need — that absent decodes as *nil* and not as
+/// zero. For a latency figure the two say opposite things, and a reader shown 0 ms would
+/// conclude the network was perfect when in fact nothing measured it.
+@Suite("Quality fields cross the socket without a version bump")
+struct WireQualityCompatibilityTests {
+
+    private let snapshotWithoutQuality = """
+        {
+          "version": 1,
+          "generatedAt": 1750000000,
+          "startedAt": 1749999940,
+          "interfaces": ["en0"],
+          "statistics": {
+            "flowCount": 1, "totalBytesOut": 100, "totalBytesIn": 200,
+            "warnings": [], "interfaceTransitions": []
+          },
+          "flows": [{
+            "id": "TCP|10.5.0.2:51234|93.184.216.34:443",
+            "transport": "TCP",
+            "localAddress": "10.5.0.2", "localPort": 51234,
+            "remoteAddress": "93.184.216.34", "remotePort": 443,
+            "hostNameIsProof": false, "isPrivateRelay": false,
+            "bytesOut": 100, "bytesIn": 200, "packetsOut": 2, "packetsIn": 1,
+            "firstSeen": 1749999950, "lastSeen": 1750000000,
+            "initiationIsCertain": true
+          }]
+        }
+        """
+
+    @Test("A daemon that measures nothing reports absence, not zero")
+    func absentQualityIsNil() throws {
+        let snapshot = try FlowSnapshot.decoder()
+            .decode(FlowSnapshot.self, from: Data(snapshotWithoutQuality.utf8))
+
+        #expect(snapshot.statistics.measuredByteShare == nil)
+        #expect(snapshot.statistics.medianRttMs == nil)
+        #expect(snapshot.statistics.retransmitRateOut == nil)
+        #expect(snapshot.statistics.connectionTimeouts == nil)
+
+        let flow = try #require(snapshot.flows.first)
+        #expect(flow.rttMs == nil)
+        #expect(flow.rttMinMs == nil)
+        #expect(flow.retransmitsOut == nil)
+        #expect(!flow.isMeasured)
+    }
+
+    @Test("Every quality field on a flow survives a round trip")
+    func flowQualityRoundTrips() throws {
+        var flow = Flow(
+            key: FlowKey(
+                transport: .tcp,
+                local: IPAddress(networkOrderBytes: [10, 5, 0, 2], family: .v4)!,
+                localPort: 51234,
+                remote: IPAddress(networkOrderBytes: [93, 184, 216, 34], family: .v4)!,
+                remotePort: 443
+            ),
+            interfaceName: "en0",
+            at: Date(timeIntervalSince1970: 1_750_000_000)
+        )
+
+        // A handshake and one round trip, so the measurement is genuinely populated
+        // rather than assembled by hand.
+        let syn = measuredSegment(at: 0, flags: [.syn], timestampValue: 10)
+        let synAck = measuredSegment(at: 0.020, flags: [.syn, .ack], timestampValue: 90,
+            timestampEcho: 10)
+        flow.record(syn, direction: .outbound, at: syn.timestamp, measuringQuality: true)
+        flow.record(synAck, direction: .inbound, at: synAck.timestamp, measuringQuality: true)
+
+        let wire = flow.wireRepresentation(measuringQuality: true)
+        let encoded = try FlowSnapshot.encoder().encode(wire)
+        let decoded = try FlowSnapshot.decoder().decode(WireFlow.self, from: encoded)
+
+        #expect(decoded.rttSource == "handshake")
+        // The handshake sample is 20 ms, and it is what the smoothed figure starts from.
+        #expect(abs(try #require(decoded.rttMs) - 20) < 0.01)
+        #expect(abs(try #require(decoded.rttMinMs) - 20) < 0.01)
+        #expect(decoded.retransmitsOut == 0)
+        #expect(decoded.isMeasured)
+    }
+
+    /// The default is not measuring, so a caller that forgets to say so publishes absence
+    /// rather than a page of zeros claiming a flawless connection.
+    @Test("A flow rendered without measuring reports nothing rather than zeroes")
+    func unmeasuredFlowPublishesNothing() {
+        let flow = Flow(
+            key: FlowKey(
+                transport: .tcp,
+                local: IPAddress(networkOrderBytes: [10, 5, 0, 2], family: .v4)!,
+                localPort: 51234,
+                remote: IPAddress(networkOrderBytes: [93, 184, 216, 34], family: .v4)!,
+                remotePort: 443
+            ),
+            interfaceName: "en0",
+            at: Date(timeIntervalSince1970: 1_750_000_000)
+        )
+        let wire = flow.wireRepresentation()
+
+        #expect(wire.rttMs == nil)
+        #expect(wire.rttMinMs == nil)
+        #expect(wire.retransmitsOut == nil)
+    }
+}
+
+private func measuredSegment(
+    at seconds: TimeInterval,
+    flags: TCPFlags,
+    timestampValue: UInt32? = nil,
+    timestampEcho: UInt32? = nil
+) -> ParsedPacket {
+    ParsedPacket(
+        transport: .tcp,
+        source: IPAddress(networkOrderBytes: [10, 5, 0, 2], family: .v4)!,
+        destination: IPAddress(networkOrderBytes: [93, 184, 216, 34], family: .v4)!,
+        sourcePort: 51234,
+        destinationPort: 443,
+        tcpFlags: flags,
+        wireBytes: 74,
+        isFragment: false,
+        payloadOffset: 74,
+        payloadCapturedLength: 0,
+        timestamp: Date(timeIntervalSince1970: 1_750_000_000 + seconds),
+        transportPayloadLength: 0,
+        hopLimit: 57,
+        tcp: TCPDetail(
+            sequence: 1000,
+            acknowledgement: 0,
+            window: 65535,
+            timestampValue: timestampValue,
+            timestampEcho: timestampEcho
+        )
+    )
 }

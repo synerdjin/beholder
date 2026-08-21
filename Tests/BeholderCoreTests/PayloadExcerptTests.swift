@@ -326,6 +326,23 @@ struct PayloadInspectorCaptureTests {
         #expect(observation.reading?.security == .cleartext, "read, not assumed from 443")
     }
 
+    /// The reason recognising WireGuard was worth doing at all. A VPN tunnel is the largest
+    /// UDP conversation on a machine running one, and while it read as `unknown` its
+    /// ciphertext was copied like any other unidentified payload — 4 KB per direction of a
+    /// bounded 64-flow buffer, spent on bytes that cannot be read, evicting the cleartext
+    /// connections the buffer exists for.
+    @Test("A tunnel's ciphertext is not copied once it is recognised")
+    func provenTunnelIsSkipped() throws {
+        // A WireGuard keepalive: type 4, three reserved zeros, an empty packet and a tag.
+        var keepalive: [UInt8] = [4, 0, 0, 0]
+        keepalive += (4..<32).map { UInt8($0) }
+        let observation = try #require(
+            inspect(keepalive, remotePort: 53728, capturePayload: true, transport: .udp)
+        )
+        #expect(observation.excerptBytes == nil)
+        #expect(observation.reading?.protocolName == "WireGuard")
+    }
+
     @Test("Unidentifiable payload is copied, since that is what there is to look at")
     func unknownIsCopied() throws {
         let observation = try #require(

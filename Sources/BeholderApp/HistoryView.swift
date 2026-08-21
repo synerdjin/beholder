@@ -33,7 +33,7 @@ struct HistoryView: View {
     private var controls: some View {
         HStack(spacing: 12) {
             Picker("Range", selection: $model.range) {
-                ForEach(HistoryModel.Range.allCases) { range in
+                ForEach(HistoryModel.ranges) { range in
                     Text(range.rawValue).tag(range)
                 }
             }

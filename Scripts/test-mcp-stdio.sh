@@ -111,8 +111,8 @@ if len(parsed) == 3:
           "the client's requested protocol revision is echoed back")
     names = [tool["name"] for tool in parsed[1]["result"]["tools"]]
     check(names == ["network_history", "endpoint_lookup", "live_connections",
-                    "beholder_status"],
-          "the four tools are advertised under their documented names")
+                    "beholder_status", "network_quality"],
+          "the five tools are advertised under their documented names")
 
 # stderr is explicitly allowed to carry logging, and clients are told not to read it as
 # failure. The one-line privacy banner lives there.

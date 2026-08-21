@@ -7,8 +7,29 @@ public struct DefaultRoute: Sendable, Equatable, CustomStringConvertible {
     public let interfaceIndex: UInt32
     public let family: IPAddress.Family
 
+    /// The next hop, when there is one with an address.
+    ///
+    /// Nil for a point-to-point link — a `utun` tunnel's next hop is the interface itself,
+    /// expressed as a link-level address with no IP in it. That absence is meaningful
+    /// rather than a failure: it is precisely the case where there is no local router to
+    /// time separately, and so no way to tell "my Wi-Fi" from "my uplink".
+    public let gateway: IPAddress?
+
+    public init(
+        interfaceName: String,
+        interfaceIndex: UInt32,
+        family: IPAddress.Family,
+        gateway: IPAddress? = nil
+    ) {
+        self.interfaceName = interfaceName
+        self.interfaceIndex = interfaceIndex
+        self.family = family
+        self.gateway = gateway
+    }
+
     public var description: String {
-        "\(interfaceName) (index \(interfaceIndex), IPv\(family.rawValue))"
+        let hop = gateway.map { " via \($0)" } ?? ""
+        return "\(interfaceName) (index \(interfaceIndex), IPv\(family.rawValue))\(hop)"
     }
 }
 
@@ -68,8 +89,61 @@ public enum RouteLookup {
             return DefaultRoute(
                 interfaceName: String(nullTerminated: nameBuffer),
                 interfaceIndex: index,
-                family: family
+                family: family,
+                gateway: gateway(in: response, count: count, header: header)
             )
+        }
+        return nil
+    }
+
+    /// Pulls the next hop out of an `RTM_GET` reply.
+    ///
+    /// The addresses follow the header packed one after another, present only when their
+    /// bit is set in `rtm_addrs` and always in bit order, each padded up to a multiple of
+    /// four bytes. There is no length prefix and no way to seek: the gateway can only be
+    /// reached by walking everything before it, which is why this is a loop rather than an
+    /// offset.
+    private static func gateway(
+        in response: [UInt8], count: Int, header: rt_msghdr
+    ) -> IPAddress? {
+        var cursor = MemoryLayout<rt_msghdr>.stride
+        var bit: Int32 = 1
+
+        while bit <= RTA_GATEWAY, cursor < count {
+            guard header.rtm_addrs & bit != 0 else {
+                bit <<= 1
+                continue
+            }
+
+            let length = Int(response[cursor])
+            let family = Int32(response[cursor + 1])
+            // A zero length still consumes a full word — the padding is what advances the
+            // cursor, and treating it as zero would spin here forever.
+            let step = length == 0 ? 4 : (length + 3) & ~3
+            guard cursor + max(length, 1) <= count else { return nil }
+
+            if bit == RTA_GATEWAY {
+                return response.withUnsafeBytes { bytes -> IPAddress? in
+                    guard let base = bytes.baseAddress?.advanced(by: cursor) else { return nil }
+                    switch family {
+                    case AF_INET where length >= MemoryLayout<sockaddr_in>.stride:
+                        let address = base.loadUnaligned(as: sockaddr_in.self)
+                        return IPAddress(v4NetworkOrder: address.sin_addr.s_addr)
+                    case AF_INET6 where length >= MemoryLayout<sockaddr_in6>.stride:
+                        var address = base.loadUnaligned(as: sockaddr_in6.self)
+                        return withUnsafeBytes(of: &address.sin6_addr) {
+                            IPAddress(v6NetworkOrderBytes: $0.baseAddress!)
+                        }
+                    default:
+                        // AF_LINK, most often: a point-to-point interface whose next hop is
+                        // the interface itself. There is no address to probe.
+                        return nil
+                    }
+                }
+            }
+
+            cursor += step
+            bit <<= 1
         }
         return nil
     }

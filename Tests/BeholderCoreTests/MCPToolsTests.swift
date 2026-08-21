@@ -413,3 +413,136 @@ struct FlowStoreDigestTests {
         }
     }
 }
+
+// MARK: - network_quality
+
+/// Steady behaviour for three networks over the past few hours, which is the ordinary case
+/// the verdict must not cry wolf about.
+private func seedQuality(
+    _ store: FlowStore,
+    minutes: Int = 120,
+    degradeAll: Bool = false,
+    interface: String = "en0",
+    timeouts: Int = 0
+) throws {
+    let now = Int64(Date().timeIntervalSince1970 / 60)
+    var rows: [QualityMinute] = []
+    for step in 0..<minutes {
+        let minute = now - Int64(minutes - step)
+        for (group, floor) in [("AS1", 20.0), ("AS2", 35.0), ("AS3", 12.0)] {
+            let bad = degradeAll && step == minutes - 1
+            rows.append(
+                QualityMinute(
+                    minute: minute,
+                    interface: interface,
+                    destinationGroup: group,
+                    destinationLabel: group == "AS1" ? "GOOGLE" : nil,
+                    rttSamples: 20,
+                    rttMinMs: bad ? floor * 8 : floor,
+                    rttP50Ms: (bad ? floor * 8 : floor) * 1.2,
+                    segmentsOut: 1000,
+                    retransmitsOut: 2,
+                    bytesOut: 1000,
+                    bytesIn: 9000,
+                    measuredBytes: 10000,
+                    flowCount: 2,
+                    connectionAttempts: 3,
+                    connectionTimeouts: group == "AS1" ? timeouts : 0
+                )
+            )
+        }
+    }
+    try store.recordQuality(rows)
+}
+
+@Suite("network_quality")
+struct MCPQualityToolTests {
+
+    @Test("Hourly grouping reports latency by hour of day with a verdict")
+    func hourlyGrouping() throws {
+        let (body, isError) = try callTool("network_quality", ["group_by": "hour"]) { store in
+            try seedQuality(store)
+        }
+        #expect(!isError)
+        #expect(body["verdict"] != nil)
+
+        let rows = try #require(body["rows"] as? [[String: Any]])
+        #expect(!rows.isEmpty)
+        #expect(rows.allSatisfy { $0["hour"] != nil })
+    }
+
+    /// The caveat that invalidates the numbers if it goes unsaid must reach this surface
+    /// too, not only the app.
+    @Test("Measuring over a VPN tunnel is said out loud in the notes")
+    func vpnCaveatTravels() throws {
+        let (body, _) = try callTool("network_quality") { store in
+            try seedQuality(store, interface: "utun8")
+        }
+        let notes = try #require(body["notes"] as? [String])
+        #expect(notes.contains { $0.contains("not your ISP") })
+    }
+
+    /// Grouping by interface is asking exactly this question, so the answer is on the row
+    /// rather than only in a footnote.
+    @Test("Interface rows say what they are measuring")
+    func interfaceRowsSayWhatTheyMeasure() throws {
+        let (body, _) = try callTool("network_quality", ["group_by": "interface"]) { store in
+            try seedQuality(store, interface: "utun8")
+        }
+        let rows = try #require(body["rows"] as? [[String: Any]])
+        let row = try #require(rows.first)
+        #expect((row["measures"] as? String)?.contains("VPN tunnel") == true)
+    }
+
+    @Test("Networks are grouped by autonomous system and named where known")
+    func networkGrouping() throws {
+        let (body, _) = try callTool("network_quality", ["group_by": "network"]) { store in
+            try seedQuality(store)
+        }
+        let rows = try #require(body["rows"] as? [[String: Any]])
+        #expect(rows.count == 3)
+        #expect(rows.contains { $0["network"] as? String == "GOOGLE" })
+        #expect(rows.allSatisfy { $0["asn"] != nil })
+    }
+
+    /// An empty window must not read as a healthy one.
+    @Test("An unmeasured window is reported as ambiguous, not as fine")
+    func emptyWindowIsAmbiguous() throws {
+        let (body, isError) = try callTool("network_quality") { _ in }
+        #expect(!isError)
+        let notes = try #require(body["notes"] as? [String])
+        #expect(notes.contains { $0.contains("beholder_status") })
+        #expect(body["rows"] == nil || (body["rows"] as? [[String: Any]])?.isEmpty == true)
+    }
+
+    @Test("Several networks slowing together is reported as being on this side")
+    func commonModeReachesTheVerdict() throws {
+        let (body, _) = try callTool("network_quality") { store in
+            try seedQuality(store, degradeAll: true)
+        }
+        let verdict = try #require(body["verdict"] as? String)
+        #expect(verdict.contains("your side of the internet"))
+    }
+
+    @Test("Unanswered connections are listed as failures rather than as an outage")
+    func failuresListed() throws {
+        let (body, _) = try callTool("network_quality") { store in
+            try seedQuality(store, timeouts: 2)
+        }
+        let failures = try #require(body["connection_failures"] as? [[String: Any]])
+        #expect(!failures.isEmpty)
+        let verdict = try #require(body["verdict"] as? String)
+        #expect(!verdict.lowercased().contains("outage"))
+    }
+
+    @Test("Every answer states the window it covers")
+    func windowIsAlwaysStated() throws {
+        let (body, _) = try callTool("network_quality") { store in
+            try seedQuality(store)
+        }
+        let window = try #require(body["window"] as? [String: Any])
+        #expect(window["since"] != nil)
+        #expect(window["until"] != nil)
+        #expect(body["measured"] != nil)
+    }
+}

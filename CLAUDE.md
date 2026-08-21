@@ -212,6 +212,41 @@ resynchronise from, so a single stray `print()` anywhere in its startup path cor
 stream permanently and surfaces only as an unexplained client-side parse error. Use stderr
 for anything human-facing. This is also why it is a separate binary from the chatty `beholderd`.
 
+**The MCP surface is five tools, and the count is a budget.** Every tool's schema sits in
+the client's context on every turn, including conversations that have nothing to do with
+networking. `network_quality` was added as a fifth because it answers a different *kind* of
+question from the other four — keyed by time rather than by identity — and folding it into
+`network_history` would have given one tool two schemas. Three places pin the list and all
+three must move together: `MCPProtocolTests`, `Scripts/test-mcp-stdio.sh`, and the design
+note at the top of `MCPTools.swift`.
+
+**`FlowStore` migrations are versioned and append-only.** `migrate()` runs an ordered list
+keyed on `PRAGMA user_version`; a database from a newer build is refused rather than read,
+for the same reason `WireProtocol.version` refuses a snapshot it cannot decode. Never edit a
+shipped step — a database in the field has already run it, so the edit reaches only new
+databases and quietly gives two files the same version and different shapes. Append instead.
+`readOnly: true` still skips migration entirely, which is what keeps a viewer from altering
+what the daemon recorded.
+
+**Nil is not zero, for anything measured.** A latency of nil means nothing measured it; zero
+would mean a perfect connection. QUIC yields no round trips at all, so absence is a common
+and honest state, and the UI shows an em dash rather than a number. The same distinction
+runs through `WireStatistics` (optional quality counters), `FlowQuality`, and the reports:
+what is counted is *retransmissions*, never "packet loss", because a passive observer sees
+the repeat and not the drop.
+
+**Quality measurement is on by default; payload reading is not.** The asymmetry is
+principled and belongs in any comment that touches it: cleartext reading touches the
+contents of traffic, while measurement reads only headers the kernel already handed over.
+More decisively, measurement has to be running when the trouble happens, so an opt-in flag
+would leave the data missing exactly when someone goes looking for it.
+
+**`--probe` is the only thing here that sends.** It is off by default and announces itself
+on startup. It exists for the two questions passive capture cannot answer at all — whether
+the link worked while idle, and whether a fault is the local Wi-Fi or the uplink — and its
+results are excluded from Beholder's own measurements *by process*, never by a capture
+filter, since a filter on those addresses would also hide genuine traffic to them.
+
 **There is no `query_sql` MCP tool and there should never be one.** Read-only SQLite still
 reaches other files via `ATTACH`, still returns unbounded results, and turns a fixed set of
 questions into an injection surface fed by generated text.
