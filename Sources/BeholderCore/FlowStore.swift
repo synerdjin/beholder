@@ -283,7 +283,7 @@ public final class FlowStore {
                 try execute("PRAGMA user_version = \(step.version);")
                 try execute("COMMIT;")
             } catch {
-                try? execute("ROLLBACK;")
+                _ = try? execute("ROLLBACK;")
                 throw error
             }
         }
@@ -328,7 +328,7 @@ public final class FlowStore {
             try updateRollups(flows)
             try execute("COMMIT;")
         } catch {
-            try? execute("ROLLBACK;")
+            _ = try? execute("ROLLBACK;")
             throw error
         }
         flowsWritten += UInt64(flows.count)
@@ -452,30 +452,63 @@ public final class FlowStore {
                 .timeIntervalSince1970 / 60
         )
 
-        let before = try count(of: "flows")
-        try execute("DELETE FROM flows WHERE last_seen < \(flowCutoff);")
+        // Read from the DELETE itself rather than by counting `flows` before and after.
+        // The scans cost time proportional to the rows *kept*, not the rows removed, so
+        // they charged full price on every hourly run that deleted nothing — which is
+        // most of them — and there is nothing the subtraction knew that the statement
+        // did not. No clamping either: a delete cannot remove a negative number of rows,
+        // whereas a subtraction of two counts could go negative and had to be guarded.
+        let removed = try execute("DELETE FROM flows WHERE last_seen < \(flowCutoff);")
         try execute("DELETE FROM rollups WHERE minute < \(rollupCutoff);")
-        let removed = before - (try count(of: "flows"))
-        flowsPruned += UInt64(max(0, removed))
-        return max(0, removed)
+        flowsPruned += UInt64(removed)
+        return removed
     }
 
-    public func count(of table: String) throws -> Int {
-        var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(handle, "SELECT COUNT(*) FROM \(table);", -1, &statement, nil)
-            == SQLITE_OK
-        else { throw StoreError.statementFailed(errorMessage) }
-        defer { sqlite3_finalize(statement) }
-        guard sqlite3_step(statement) == SQLITE_ROW else { return 0 }
-        return Int(sqlite3_column_int64(statement, 0))
+    /// The tables a row count can be taken of.
+    ///
+    /// An enum rather than a `String` because SQLite cannot bind an identifier, so the
+    /// name has to be interpolated into the statement. Validating a string against a
+    /// list at run time would work, but making an unwanted value unspellable is both
+    /// cheaper and checked by the compiler — and it leaves no method that a later caller
+    /// could hand unsanitised text to.
+    ///
+    /// Deliberately not a mirror of the five tables in `migrations`. A case nothing
+    /// spells raises no warning, so a list kept complete for its own sake is a second
+    /// copy of the schema that drifts silently; these are the two that have callers, and
+    /// the quality tables report their own deletions through `execute` instead. Add a
+    /// case when something needs one.
+    enum Table: String {
+        case flows
+        case rollups
     }
 
+    func count(of table: Table) throws -> Int {
+        var count = 0
+        try withStatement("SELECT COUNT(*) FROM \(table.rawValue);") { statement in
+            if sqlite3_step(statement) == SQLITE_ROW {
+                count = Int(sqlite3_column_int64(statement, 0))
+            }
+        }
+        return count
+    }
+
+    /// Runs one statement, returning the rows it changed.
+    ///
     /// Internal rather than private because `FlowStoreQuality` runs the same statements
     /// against the same handle, and had copied this verbatim to reach it.
-    func execute(_ sql: String) throws {
+    ///
+    /// The count is the reason both pruners can report what they deleted without
+    /// counting the table twice. It is only meaningful for a single row-changing
+    /// statement: `sqlite3_changes` reports the last statement that changed rows, so a
+    /// `BEGIN` or `COMMIT` leaves the previous count standing, and a `sql` holding two
+    /// `DELETE`s would report only the second. Pass one statement and read the result
+    /// where it is caused — reading it later is the bug this replaced.
+    @discardableResult
+    func execute(_ sql: String) throws -> Int {
         guard sqlite3_exec(handle, sql, nil, nil, nil) == SQLITE_OK else {
             throw StoreError.statementFailed(errorMessage)
         }
+        return Int(sqlite3_changes(handle))
     }
 
     private static func giveToInvokingUser(_ path: String) {

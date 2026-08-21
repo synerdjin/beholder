@@ -62,8 +62,8 @@ struct FlowStoreTests {
     @Test("A store is created with its schema")
     func createsSchema() throws {
         try withStore { store in
-            let flowCount = try store.count(of: "flows")
-            let rollupCount = try store.count(of: "rollups")
+            let flowCount = try store.count(of: .flows)
+            let rollupCount = try store.count(of: .rollups)
             #expect(flowCount == 0)
             #expect(rollupCount == 0)
         }
@@ -77,7 +77,7 @@ struct FlowStoreTests {
                 makeFlow(localPort: 1000, host: "example.com", bytesOut: 100, bytesIn: 900, at: now),
                 makeFlow(localPort: 1001, host: "other.com", bytesOut: 50, bytesIn: 50, at: now),
             ])
-            let written = try store.count(of: "flows")
+            let written = try store.count(of: .flows)
             #expect(written == 2)
 
             let results = try store.flows(since: now.addingTimeInterval(-60))
@@ -185,11 +185,11 @@ struct FlowStoreTests {
                 makeFlow(localPort: 1000, at: now.addingTimeInterval(-30 * 86400)),
                 makeFlow(localPort: 1001, at: now),
             ])
-            let before = try store.count(of: "flows")
+            let before = try store.count(of: .flows)
             #expect(before == 2)
 
             let removed = try store.prune(now: now)
-            let remaining = try store.count(of: "flows")
+            let remaining = try store.count(of: .flows)
             #expect(removed == 1)
             #expect(remaining == 1)
             // Pruning again removes nothing, rather than reporting phantom deletions.
@@ -255,7 +255,7 @@ struct FlowStoreTests {
     func emptyBatch() throws {
         try withStore { store in
             let recorded = try store.record([])
-            let stored = try store.count(of: "flows")
+            let stored = try store.count(of: .flows)
             #expect(recorded == 0)
             #expect(stored == 0)
         }
@@ -585,7 +585,12 @@ struct FlowStoreQualityTests {
             qualityRow(minute: minute(now), minMs: 12),
         ])
 
-        _ = try store.pruneQuality(now: now)
+        // The two old minutes go; the recent one stays, and no hour or probe row is old
+        // enough to be pruned. Pinned because the count used to be read from
+        // `sqlite3_changes` after the COMMIT, which reported the last DELETE alone — the
+        // probes table — and so answered zero however much it had actually deleted.
+        let removed = try store.pruneQuality(now: now)
+        #expect(removed == 2)
 
         let remaining = try store.qualityMinutes(
             since: old.addingTimeInterval(-86400), until: now.addingTimeInterval(600)
