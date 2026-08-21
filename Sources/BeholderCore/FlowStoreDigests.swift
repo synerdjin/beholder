@@ -537,4 +537,11 @@ extension FlowStore {
     func unsigned(_ statement: OpaquePointer?, _ column: Int32) -> UInt64 {
         UInt64(max(0, sqlite3_column_int64(statement, column)))
     }
+
+    /// A measurement column, where NULL means nothing measured it. Distinct from zero, and
+    /// the whole quality feature turns on that distinction, so it is never defaulted here.
+    func optionalDouble(_ statement: OpaquePointer?, _ column: Int32) -> Double? {
+        sqlite3_column_type(statement, column) == SQLITE_NULL
+            ? nil : sqlite3_column_double(statement, column)
+    }
 }

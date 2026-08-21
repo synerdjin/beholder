@@ -9,6 +9,23 @@ import Foundation
 /// empty database that was in fact being filled.
 public enum BeholderPaths {
 
+    /// The launchd job description, when Beholder is installed as a daemon.
+    ///
+    /// Here rather than spelled out at each call site for the reason this whole type
+    /// exists: the label is chosen by `install-daemon.sh` and read back by both the app and
+    /// the MCP `network_status` tool, and two of the three getting it right is the same as
+    /// none of them. Renaming the job is now one edit on the Swift side.
+    public static let launchdPlist = "/Library/LaunchDaemons/com.beholder.daemon.plist"
+
+    /// Whether a launchd job is installed.
+    ///
+    /// Deliberately a function rather than a cached constant: the app is long-lived, and a
+    /// value read once at launch goes stale the moment someone installs or removes the
+    /// daemon while the window is open.
+    public static func isInstalledAsDaemon() -> Bool {
+        FileManager.default.fileExists(atPath: launchdPlist)
+    }
+
     /// The directory holding the history database and the learned-name cache.
     ///
     /// Under the user's own Application Support rather than a system path, because these

@@ -18,7 +18,9 @@ let package = Package(
         // helpers for constructs Swift imports awkwardly. Links libpcap from the SDK.
         .target(
             name: "CBeholderShim",
-            linkerSettings: [.linkedLibrary("pcap"), .linkedLibrary("sqlite3")]
+            linkerSettings: [
+                .linkedLibrary("pcap"), .linkedLibrary("sqlite3"), .linkedLibrary("z"),
+            ]
         ),
 
         // All pure, testable logic: parsers, address types, flow aggregation.

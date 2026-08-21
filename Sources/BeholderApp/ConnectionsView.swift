@@ -1,16 +1,14 @@
 import BeholderCore
 import SwiftUI
-
-/// Counts with a correctly pluralised noun.
+/// A latency, or an em dash when nothing measured one.
 ///
-/// "1 connections" is the kind of small wrongness that makes a tool feel unfinished, and
-/// it appears wherever a normally-large count happens to be one. Generic over integer
-/// width because these counts arrive as both `Int` and `UInt64`.
-func pluralised(
-    _ count: some BinaryInteger, _ singular: String, plural: String? = nil
-) -> String {
-    let noun = count == 1 ? singular : (plural ?? singular + "s")
-    return "\(count) \(noun)"
+/// Nil is not zero: a connection nothing could time is not a connection that took no time,
+/// and the dash says so. One decimal below ten milliseconds and none above, because the
+/// difference between 3.2 ms and 3 ms is the whole signal on a local link and the
+/// difference between 180 ms and 180.4 ms is noise.
+func formatMilliseconds(_ value: Double?) -> String {
+    guard let value else { return "—" }
+    return value < 10 ? String(format: "%.1f ms", value) : String(format: "%.0f ms", value)
 }
 
 /// Byte counts, rendered the way people read them.

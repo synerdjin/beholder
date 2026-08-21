@@ -7,16 +7,25 @@ import Foundation
 // which is exactly why the answer is written down rather than left to be re-derived.
 // Read-only SQLite still reaches other files through ATTACH, still returns unbounded
 // results that blow a context window, and turns a fixed set of questions into an
-// injection surface fed by generated text. The four tools below are a deliberate
-// interface. A SQL passthrough is the absence of one.
+// injection surface fed by generated text. The tools below are a deliberate interface.
+// A SQL passthrough is the absence of one.
 
 /// The tools, and the code behind them.
 ///
-/// Four, and the number is a design constraint rather than an accident of what was easy.
-/// Every tool's name, description and schema sits in the client's context on every turn of
-/// every conversation, including the ones that have nothing to do with networking — so the
-/// set is kept small on purpose. Eight tools would roughly double that standing cost and
+/// Five, and the number is still a design constraint rather than an accident of what was
+/// easy. Every tool's name, description and schema sits in the client's context on every
+/// turn of every conversation, including the ones with nothing to do with networking — so
+/// the set is kept small on purpose. Ten tools would roughly double that standing cost and
 /// make the model worse at choosing between them, not better.
+///
+/// It was four for a long time, and `network_quality` was added rather than folded into
+/// one of them because it answers a different *kind* of question. The other four are all
+/// forms of "who talked to whom": they return endpoints, processes and byte counts, keyed
+/// by identity. Quality is keyed by time and asks how well the path worked — "was my
+/// internet bad on Tuesday evening" shares no arguments, no rows and no grouping with
+/// "what did Safari talk to". Bending `network_history` to carry it would have given one
+/// tool two schemas wearing a trench coat, which costs the model more than a fifth name
+/// does.
 public struct MCPToolbox: Sendable {
 
     public let historyPath: String
@@ -180,6 +189,41 @@ public struct MCPToolbox: Sendable {
                 """,
             inputSchema: ["type": "object", "properties": .object([:]), "additionalProperties": false]
         ),
+
+        MCPToolDefinition(
+            name: "network_quality",
+            title: "How well the network worked",
+            description: """
+                Latency, packet retransmission and connection failures over a past window,                 from Beholder's own measurements — and, where the evidence supports it,                 whether a bad stretch was this connection's fault or the far end's. Answers                 questions like "was my internet bad last Tuesday evening", "is my ISP                 reliable", "why do calls stutter". Group by hour to see time-of-day                 congestion, by network to compare destinations, by interface to separate a                 VPN tunnel from the link underneath it. Every answer states what share of                 traffic it could measure: QUIC carries no round trips a passive observer can                 read, so coverage is often well short of everything.
+                """,
+            inputSchema: [
+                "type": "object",
+                "properties": [
+                    "since": [
+                        "type": "string",
+                        "description":
+                            "Start of the window: an ISO timestamp, or a relative time like '7d' or '12h'. Defaults to 7 days ago.",
+                    ],
+                    "until": [
+                        "type": "string",
+                        "description": "End of the window. Defaults to now.",
+                    ],
+                    "group_by": [
+                        "type": "string",
+                        "enum": ["hour", "network", "interface", "day"],
+                        "description":
+                            "How to group the rows. 'hour' is hour of day averaged over the window, which is where evening congestion shows.",
+                    ],
+                    "interface": [
+                        "type": "string",
+                        "description":
+                            "Only this interface. A utun name measures a VPN tunnel rather than the connection beneath it.",
+                    ],
+                    "limit": ["type": "integer", "description": "Maximum rows (default 25)."],
+                ],
+                "additionalProperties": false,
+            ]
+        ),
     ]
 
     // MARK: - Dispatch
@@ -187,6 +231,7 @@ public struct MCPToolbox: Sendable {
     public func invoke(_ name: String, _ arguments: JSONValue) -> MCPToolResult {
         do {
             switch name {
+            case "network_quality": return try networkQuality(arguments)
             case "network_history": return try networkHistory(arguments)
             case "endpoint_lookup": return try endpointLookup(arguments)
             case "live_connections": return try liveConnections(arguments)
@@ -520,10 +565,7 @@ public struct MCPToolbox: Sendable {
             document.members["default_route"] = .string(route.description)
         }
 
-        let plist = "/Library/LaunchDaemons/com.beholder.daemon.plist"
-        document.members["installed_as_daemon"] = .bool(
-            FileManager.default.fileExists(atPath: plist)
-        )
+        document.members["installed_as_daemon"] = .bool(BeholderPaths.isInstalledAsDaemon())
 
         if !steps.isEmpty {
             document.members["next_steps"] = .array(steps.map { .string($0) })
@@ -536,6 +578,297 @@ public struct MCPToolbox: Sendable {
     private func openStore() throws -> FlowStore? {
         guard FileManager.default.fileExists(atPath: historyPath) else { return nil }
         return try FlowStore(path: historyPath, readOnly: true)
+    }
+
+    // MARK: - network_quality
+
+    /// How well the network worked, and — where the evidence supports it — whose fault it
+    /// was when it did not.
+    ///
+    /// Every path out of here carries its caveats in `notes`, because the numbers alone
+    /// invite a confident reading they do not support: a latency figure over a fifth of the
+    /// traffic looks exactly like one over all of it, and a round trip through a VPN
+    /// tunnel looks exactly like one to the destination.
+    private func networkQuality(_ arguments: JSONValue) throws -> MCPToolResult {
+        let now = Date()
+        let since = try time(
+            arguments["since"], relativeTo: now, default: now.addingTimeInterval(-7 * 86400)
+        )
+        let until = try time(arguments["until"], relativeTo: now, default: now)
+        let grouping = arguments["group_by"]?.stringValue ?? "hour"
+        let interface = arguments["interface"]?.stringValue
+        let limit = clamp(arguments["limit"]?.intValue ?? 25, 1, 200)
+
+        guard let store = try openStore() else { return missingDatabase() }
+        defer { store.close() }
+
+        var document = ResultDocument()
+        document.members["window"] = window(since, until)
+
+        var rows = try store.qualityMinutes(since: since, until: until, interface: interface)
+        let interfaces = try store.qualityInterfaces(since: since, until: until)
+
+        // Fall back to the hourly tier for whatever part of the window the fine tier no
+        // longer holds. Without this, asking for ninety days answered with thirty days of
+        // rows and sixty of silence — and silence here is ambiguous between "nothing
+        // happened" and "nothing was watching", which is the one thing every report in this
+        // program is required not to be.
+        if let horizon = try store.qualityMinuteHorizon(), horizon > since {
+            let coarse = try store.qualityHours(
+                since: since, until: horizon, interface: interface
+            )
+            if !coarse.isEmpty {
+                rows = coarse + rows
+                document.notes.append(
+                    "Rows before \(Self.timestamp(horizon)) are hourly rather than "
+                        + "per-minute: the fine tier is kept for a month and folded into "
+                        + "hours after that. Their floors and totals are exact; a median, "
+                        + "a 95th percentile and handshake timings cannot be summed and are "
+                        + "absent rather than estimated."
+                )
+            }
+        }
+
+        if let coverage = try store.qualityCoverage() {
+            document.members["measured"] = [
+                "earliest": .string(Self.timestamp(coverage.earliest)),
+                "latest": .string(Self.timestamp(coverage.latest)),
+                "minutes": .integer(coverage.minutes),
+            ]
+        }
+
+        guard !rows.isEmpty else {
+            document.notes.append(
+                """
+                Nothing was measured in that window. That is ambiguous between a quiet                 network and a daemon that was not running — call beholder_status to tell                 them apart. Quality measurement also needs a build that records it; it has                 only been kept since the daemon started doing so.
+                """
+            )
+            return MCPToolResult(text: document.rendered())
+        }
+
+        let report = Reliability.report(
+            rows: rows, interfaces: interfaces, start: since, end: until
+        )
+        document.members["verdict"] = .string(report.verdict)
+
+        switch grouping {
+        case "network":
+            document.rows = Self.qualityByNetwork(rows: rows, report: report, limit: limit)
+        case "interface":
+            document.rows = Self.qualityByInterface(rows: rows, limit: limit)
+        case "day":
+            document.rows = Self.qualityByDay(rows: rows, report: report, limit: limit)
+        default:
+            document.rows = report.hours
+                .filter { $0.samples > 0 }
+                .prefix(limit)
+                .map { hour in
+                    let hourDegraded: JSONValue? =
+                        hour.degradedMinutes > 0 ? .integer(hour.degradedMinutes) : nil
+                    return JSONValue.object(
+                        omittingNils: [
+                            "hour": .string(String(format: "%02d:00", hour.hour)),
+                            "floor_ms": hour.floorMs.map { JSONValue.double(Self.rounded($0)) },
+                            "typical_ms": hour.typicalMs.map { JSONValue.double(Self.rounded($0)) },
+                            "resent_out_pct": hour.retransmitRateOut.map {
+                                JSONValue.double(Self.rounded($0 * 100, places: 2))
+                            },
+                            "bytes": .integer(Int(clamping: hour.bytes)),
+                            "samples": .integer(hour.samples),
+                            "degraded_minutes": hourDegraded,
+                        ]
+                    )
+                }
+        }
+
+        if let bufferbloat = report.bufferbloat, bufferbloat.isSignificant {
+            document.members["latency_under_load"] = [
+                "at_rest_ms": .double(Self.rounded(bufferbloat.idleFloorMs)),
+                "loaded_ms": .double(Self.rounded(bufferbloat.loadedTypicalMs)),
+                "added_ms": .double(Self.rounded(bufferbloat.inflationMs)),
+            ]
+        }
+        if !report.failures.isEmpty {
+            document.members["connection_failures"] = .array(
+                report.failures.prefix(10).map { failure in
+                    JSONValue.object([
+                        "from": .string(Self.timestamp(failure.start)),
+                        "to": .string(Self.timestamp(failure.end)),
+                        "attempts": .integer(failure.timeouts),
+                        "networks": .integer(failure.networks),
+                    ])
+                }
+            )
+        }
+
+        // Probes, when this daemon was asked to send any. This is the only measurement
+        // here that can separate the local link from everything past it, and it was being
+        // written to the database and read by nothing.
+        if let probes = try store.probeSummary(since: since, until: until) {
+            func leg(_ value: (min: Double?, median: Double?, loss: Double)?) -> JSONValue? {
+                guard let value else { return nil }
+                return JSONValue.object(
+                    omittingNils: [
+                        "floor_ms": value.min.map { JSONValue.double(Self.rounded($0)) },
+                        "typical_ms": value.median.map { JSONValue.double(Self.rounded($0)) },
+                        "loss_pct": .double(Self.rounded(value.loss * 100, places: 2)),
+                    ])
+            }
+            document.members["probes"] = JSONValue.object(
+                omittingNils: [
+                    "first_hop": leg(probes.gateway),
+                    "distant_anchors": leg(probes.anchors),
+                    "samples": .integer(probes.samples),
+                    "reading": probes.reading.map { JSONValue.string($0) },
+                ])
+        }
+
+        // The caveats are the point, not decoration. Passed through verbatim from the
+        // report so this surface and the app cannot drift into saying different things.
+        document.notes.append(contentsOf: report.caveats)
+        if report.baselines.count < Reliability.commonModeGroups {
+            document.notes.append(
+                """
+                Only \(report.baselines.count) \(agreeing(report.baselines.count, "network was", "networks were")) measured often enough to compare. Telling a problem on this side from a slow destination needs at least \(Reliability.commonModeGroups) independent ones.
+                """
+            )
+        }
+        return MCPToolResult(text: document.rendered())
+    }
+
+    /// The figures every quality grouping reports, summed once per group.
+    ///
+    /// Three groupers each summed these by hand and each restated the rule that a
+    /// retransmission rate over nothing sent is nil rather than zero — three chances for
+    /// the distinction this whole feature is built around to drift. Two of them also
+    /// re-summed the byte total inside a sort comparator, which is O(n) work per
+    /// comparison rather than once per group.
+    private struct QualityTotals {
+        var bytes: UInt64 = 0
+        var sentOut: UInt64 = 0
+        var resentOut: UInt64 = 0
+        /// The best round trip seen anywhere in the group: the baseline everything else is
+        /// read against.
+        var floorMs: Double?
+        var typicalMs: Double?
+        /// The typical *worst* minute, and the fastest handshake. Both are recorded per
+        /// minute and were being read back out of the database and then dropped.
+        var p95Ms: Double?
+        var handshakeFloorMs: Double?
+
+        init(_ rows: [QualityMinute]) {
+            var medians: [Double] = []
+            var p95s: [Double] = []
+            for row in rows {
+                bytes &+= row.totalBytes
+                sentOut &+= row.segmentsOut
+                resentOut &+= row.retransmitsOut
+                if let floor = row.rttMinMs { floorMs = Swift.min(floorMs ?? floor, floor) }
+                if let handshake = row.handshakeMinMs {
+                    handshakeFloorMs = Swift.min(handshakeFloorMs ?? handshake, handshake)
+                }
+                if let median = row.rttP50Ms { medians.append(median) }
+                if let p95 = row.rttP95Ms { p95s.append(p95) }
+            }
+            typicalMs = medians.median
+            p95Ms = p95s.median
+        }
+
+        /// Nil, never zero. A rate over nothing sent is not a rate of zero.
+        var resentOutPercent: Double? {
+            sentOut > 0 ? Double(resentOut) / Double(sentOut) * 100 : nil
+        }
+    }
+
+    /// Buckets rows and totals each bucket once.
+    private static func grouped<Key: Hashable>(
+        _ rows: [QualityMinute],
+        by key: (QualityMinute) -> Key
+    ) -> [(key: Key, rows: [QualityMinute], totals: QualityTotals)] {
+        var buckets: [Key: [QualityMinute]] = [:]
+        for row in rows { buckets[key(row), default: []].append(row) }
+        return buckets.map { (key: $0.key, rows: $0.value, totals: QualityTotals($0.value)) }
+    }
+
+    /// The members every grouping shares, so a caller reading two of them sees one shape.
+    private static func qualityMembers(_ totals: QualityTotals, minutes: Int) -> [String: JSONValue?]
+    {
+        [
+            "floor_ms": totals.floorMs.map { JSONValue.double(rounded($0)) },
+            "typical_ms": totals.typicalMs.map { JSONValue.double(rounded($0)) },
+            "p95_ms": totals.p95Ms.map { JSONValue.double(rounded($0)) },
+            "handshake_floor_ms": totals.handshakeFloorMs.map { JSONValue.double(rounded($0)) },
+            "bytes": .integer(Int(clamping: totals.bytes)),
+            "resent_out_pct": totals.resentOutPercent.map {
+                JSONValue.double(rounded($0, places: 2))
+            },
+            "minutes": .integer(minutes),
+        ]
+    }
+
+    private static func qualityByNetwork(
+        rows: [QualityMinute], report: Reliability.Report, limit: Int
+    ) -> [JSONValue] {
+        grouped(rows, by: \.destinationGroup)
+            .sorted { $0.totals.bytes > $1.totals.bytes }
+            .prefix(limit)
+            .map { group, groupRows, totals in
+                let degraded = report.degraded.count { $0.groups.contains(group) }
+                var members = qualityMembers(totals, minutes: groupRows.count)
+                members["network"] = .string(
+                    cleaned(report.baselines[group]?.label ?? group, limit: 96))
+                members["asn"] = .string(group)
+                // The report's own baseline when it has one: it is computed over the whole
+                // window rather than over this grouping, and the two must not disagree.
+                if let baseline = report.baselines[group] {
+                    members["floor_ms"] = .double(rounded(baseline.floorMs))
+                }
+                members["degraded_minutes"] = degraded > 0 ? .integer(degraded) : nil
+                return JSONValue.object(omittingNils: members)
+            }
+    }
+
+    private static func qualityByInterface(rows: [QualityMinute], limit: Int) -> [JSONValue] {
+        grouped(rows, by: \.interface)
+            .sorted { $0.totals.bytes > $1.totals.bytes }
+            .prefix(limit)
+            .map { name, interfaceRows, totals in
+                var members = qualityMembers(totals, minutes: interfaceRows.count)
+                members["interface"] = .string(cleaned(name, limit: 32))
+                // Said on the row rather than only in a note, because a caller grouping by
+                // interface is asking exactly this question.
+                members["measures"] = .string(
+                    name.hasPrefix("utun") || name.hasPrefix("ipsec")
+                        ? "a VPN tunnel, not the link beneath it" : "the link directly"
+                )
+                return JSONValue.object(omittingNils: members)
+            }
+    }
+
+    private static func qualityByDay(
+        rows: [QualityMinute], report: Reliability.Report, limit: Int
+    ) -> [JSONValue] {
+        let calendar = Calendar.current
+        var degradedPerDay: [Date: Int] = [:]
+        for minute in report.degraded where minute.isCommonMode {
+            degradedPerDay[calendar.startOfDay(for: minute.at), default: 0] += 1
+        }
+
+        return grouped(rows, by: { calendar.startOfDay(for: $0.at) })
+            .sorted { $0.key < $1.key }
+            .suffix(limit)
+            .map { day, dayRows, totals in
+                var members = qualityMembers(totals, minutes: dayRows.count)
+                members["day"] = .string(timestamp(day))
+                let degraded = degradedPerDay[day] ?? 0
+                members["shared_path_degraded_minutes"] = degraded > 0 ? .integer(degraded) : nil
+                return JSONValue.object(omittingNils: members)
+            }
+    }
+
+    static func rounded(_ value: Double, places: Int = 1) -> Double {
+        let scale = pow(10.0, Double(places))
+        return (value * scale).rounded() / scale
     }
 
     private func missingDatabase() -> MCPToolResult {

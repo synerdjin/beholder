@@ -287,3 +287,108 @@ if [[ "${WITHOUT_FLAG}" != "absent" ]]; then
 fi
 
 echo "PASS: --read-cleartext publishes an excerpt list (${WITH_FLAG}); without it, absent."
+
+# ---------------------------------------------------------------------------
+# Quality measurement is on by default, and --no-quality turns it off.
+#
+# The asymmetry with --read-cleartext above is deliberate and worth pinning: payload
+# reading is opt-in because it touches the contents of traffic, while measurement reads
+# only header fields the kernel already handed over. It is on by default because it has
+# to be running when the trouble happens.
+#
+# What matters on the wire is that "not measuring" is published as *absence* and not as
+# zero. A reader shown 0 ms would conclude the network was flawless when in fact nothing
+# looked at it.
+# ---------------------------------------------------------------------------
+
+read_quality() {
+    python3 - "$1" <<'PY'
+import json, socket, sys
+
+path = sys.argv[1]
+client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+client.settimeout(10)
+client.connect(path)
+
+buffer = b""
+while b"\n" not in buffer:
+    chunk = client.recv(65536)
+    if not chunk:
+        break
+    buffer += chunk
+client.close()
+
+if b"\n" not in buffer:
+    sys.exit("no complete snapshot arrived")
+
+statistics = json.loads(buffer.split(b"\n")[0])["statistics"]
+keys = [k for k in ("measuredFlowCount", "unmeasurableFlowCount") if k in statistics]
+if not keys:
+    print("absent")
+else:
+    for key in keys:
+        if not isinstance(statistics[key], int):
+            sys.exit(f"{key} is {type(statistics[key]).__name__}, not a number")
+    print(f"present:{len(keys)}")
+PY
+}
+
+start_daemon
+if ! QUALITY_DEFAULT="$(read_quality "${SOCKET}")"; then
+    echo "FAIL: no snapshot from a daemon started with measurement on by default." >&2
+    exit 1
+fi
+require_clean_exit "measuring quality"
+
+start_daemon "" --no-quality
+if ! QUALITY_OFF="$(read_quality "${SOCKET}")"; then
+    echo "FAIL: no snapshot from a daemon started with --no-quality." >&2
+    exit 1
+fi
+require_clean_exit "not measuring quality"
+
+if [[ "${QUALITY_DEFAULT}" != present:* ]]; then
+    echo "FAIL: measurement is meant to be on by default, but the snapshot" >&2
+    echo "      published no quality counters (got '${QUALITY_DEFAULT}')." >&2
+    exit 1
+fi
+if [[ "${QUALITY_OFF}" != "absent" ]]; then
+    echo "FAIL: --no-quality still published '${QUALITY_OFF}'." >&2
+    echo "      The counters must be absent, not zero: zero would tell a reader the" >&2
+    echo "      network was measured and found perfect." >&2
+    exit 1
+fi
+
+echo "PASS: quality counters are published by default (${QUALITY_DEFAULT}); --no-quality omits them."
+
+# ---------------------------------------------------------------------------
+# --probe is the one flag that makes Beholder send.
+#
+# Pinned because it is a promise to the user, not an implementation detail: the README
+# says this program watches and does not interfere, and with --probe it also emits. The
+# banner is where that is disclosed, so a silent regression in it is a silent regression
+# in the disclosure.
+# ---------------------------------------------------------------------------
+
+capture_banner() {
+    "${DAEMON}" --serve --self-test --no-log --socket "${SOCKET}.banner" "$@" 2>&1 || true
+}
+
+WITH_PROBE="$(capture_banner --probe --probe-interval 30)"
+WITHOUT_PROBE="$(capture_banner)"
+
+if ! grep -q "no longer only watching" <<<"${WITH_PROBE}"; then
+    echo "FAIL: --probe did not announce that the daemon sends." >&2
+    echo "      That banner is the disclosure; without it the flag is silent." >&2
+    exit 1
+fi
+if ! grep -q "ICMP echo" <<<"${WITH_PROBE}"; then
+    echo "FAIL: --probe did not name what it sends or where." >&2
+    exit 1
+fi
+if grep -q "no longer only watching" <<<"${WITHOUT_PROBE}"; then
+    echo "FAIL: a daemon without --probe claimed to be sending." >&2
+    exit 1
+fi
+
+echo "PASS: --probe announces that the daemon sends, and names its targets; without it, silent."

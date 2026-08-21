@@ -91,6 +91,46 @@ public struct WireFlow: Codable, Sendable, Identifiable, Hashable {
     /// inference" is never mistaken for "unprotected, observed".
     public let securityIsProof: Bool?
 
+    // MARK: Quality
+    //
+    // All optional, and nil means "not measured" rather than zero. The distinction is
+    // load-bearing: a QUIC conversation offers a passive observer no round trips at all,
+    // and publishing that as 0 ms would read as a perfect connection rather than as an
+    // unanswerable question. Readers must render absence, never a number.
+
+    /// Smoothed round-trip time in milliseconds, RFC 6298.
+    public let rttMs: Double?
+    /// The lowest round trip seen, and the figure to reason about: the smoothed value
+    /// carries whatever delay the far end added before answering, and this does not.
+    public let rttMinMs: Double?
+    /// RFC 6298's RTTVAR — the jitter figure for a TCP conversation.
+    public let rttVarMs: Double?
+    /// Which evidence the round trip rests on: "tcp timestamps", "handshake" or "ack".
+    public let rttSource: String?
+
+    /// Segments that covered sequence space already seen. Whether that is proof of a
+    /// retransmission or only consistent with one depends on `retransmitsAreProven`, and
+    /// the two travel together for the same reason a hostname travels with its provenance.
+    public let retransmitsOut: UInt64?
+    public let retransmitsIn: UInt64?
+    public let retransmitsAreProven: Bool?
+    /// Variation in the gap between inbound packets, for conversations with no round trip
+    /// to measure. Absent unless there were enough samples for it to mean anything.
+    public let arrivalJitterMs: Double?
+    public let hopCount: Int?
+    /// The interface coalesced segments before handing them over, so the segment counts
+    /// above are counting something other than segments.
+    public let segmentOffload: Bool?
+
+    /// Whether this flow carries any measurement at all.
+    ///
+    /// False for QUIC and every other UDP conversation. A view listing round trips has to
+    /// tell this apart from a fast connection and show nothing rather than a zero.
+    ///
+    /// Read off the round trip itself rather than off a sample count, which was a wire
+    /// field published for this one derivation and nothing else.
+    public var isMeasured: Bool { rttMs != nil }
+
     public var totalBytes: UInt64 { bytesOut + bytesIn }
 
     /// True when this connection is not known to be protected — either read as cleartext,
@@ -134,7 +174,17 @@ public struct WireFlow: Codable, Sendable, Identifiable, Hashable {
         isOutgoing: Bool?, initiationIsCertain: Bool,
         security: TransportSecurity? = nil,
         protocolName: String? = nil,
-        securityIsProof: Bool? = nil
+        securityIsProof: Bool? = nil,
+        rttMs: Double? = nil,
+        rttMinMs: Double? = nil,
+        rttVarMs: Double? = nil,
+        rttSource: String? = nil,
+        retransmitsOut: UInt64? = nil,
+        retransmitsIn: UInt64? = nil,
+        retransmitsAreProven: Bool? = nil,
+        arrivalJitterMs: Double? = nil,
+        hopCount: Int? = nil,
+        segmentOffload: Bool? = nil
     ) {
         self.security = security
         self.protocolName = protocolName
@@ -163,6 +213,16 @@ public struct WireFlow: Codable, Sendable, Identifiable, Hashable {
         self.tcpState = tcpState
         self.firstSeen = firstSeen
         self.lastSeen = lastSeen
+        self.rttMs = rttMs
+        self.rttMinMs = rttMinMs
+        self.rttVarMs = rttVarMs
+        self.rttSource = rttSource
+        self.retransmitsOut = retransmitsOut
+        self.retransmitsIn = retransmitsIn
+        self.retransmitsAreProven = retransmitsAreProven
+        self.arrivalJitterMs = arrivalJitterMs
+        self.hopCount = hopCount
+        self.segmentOffload = segmentOffload
     }
 }
 
@@ -241,6 +301,55 @@ public struct WireStatistics: Codable, Sendable, Hashable {
     public var packetsCaptured: UInt64 = 0
     public var packetsDropped: UInt64 = 0
 
+    // MARK: Quality
+    //
+    // Nil throughout means measurement was off. Zero would mean it was on and found
+    // nothing, and the two must not be confused — the same distinction `cleartextExcerpts`
+    // draws, and for the same reason.
+
+    /// Flows a round trip could actually be measured on, and how many there were in total.
+    /// The ratio is the honesty figure: everything below covers only the first number.
+    public var measuredFlowCount: Int?
+    /// The share of bytes that moved on flows quality could be measured on, 0 to 1.
+    ///
+    /// The single most important caveat this tool publishes about latency. HTTP/3 runs
+    /// over QUIC, which is UDP, and offers a passive observer no round trips at all — so
+    /// on a machine that mostly browses, a latency report can honestly cover a minority of
+    /// the traffic. A reader that shows the latency without showing this is misleading.
+    public var measuredByteShare: Double?
+
+    /// Median and lowest round trip across every measurable flow, in milliseconds.
+    public var medianRttMs: Double?
+    public var minRttMs: Double?
+
+    /// Retransmitted segments as a share of segments sent, per direction, 0 to 1.
+    ///
+    /// Named for what was observed. A passive observer sees repeats, not drops, and loss
+    /// on the return path shows up as an outbound repeat exactly as forward loss does —
+    /// so this is a retransmission rate, and calling it a packet loss rate would claim a
+    /// measurement nobody here made.
+    public var retransmitRateOut: Double?
+    public var retransmitRateIn: Double?
+
+    /// Conversations offering no round trip to measure, and what they moved. Mostly QUIC.
+    public var unmeasurableFlowCount: Int?
+    public var unmeasurableBytes: UInt64?
+
+    /// Connections attempted, and connections that got no answer at all.
+    ///
+    /// A timeout is evidence the path failed while it was being used. A refusal — a RST —
+    /// is the far end declining, which is not the network's doing and is counted apart.
+    public var connectionAttempts: Int?
+    public var connectionTimeouts: Int?
+    public var connectionRefusals: Int?
+
+    /// Round-trip samples thrown out as impossible, which is what a stepped clock looks
+    /// like from here. Published so a quiet network and a corrected clock are not confused.
+    public var discardedRttSamples: UInt64?
+
+    /// Flows whose interface coalesced segments, making their segment counts unreliable.
+    public var segmentOffloadFlowCount: Int?
+
     /// Human-readable warnings — transparent proxies, and anything else that makes the
     /// per-process numbers misleading.
     public var warnings: [String] = []
@@ -274,6 +383,18 @@ public struct WireStatistics: Codable, Sendable, Hashable {
         func strings(_ key: CodingKeys) throws -> [String] {
             try container.decodeIfPresent([String].self, forKey: key) ?? []
         }
+        // The quality counters stay optional through decoding rather than falling back to
+        // zero, because for them absence and zero say different things: "nothing was
+        // measuring" against "measured, and found none".
+        func optionalInt(_ key: CodingKeys) throws -> Int? {
+            try container.decodeIfPresent(Int.self, forKey: key)
+        }
+        func optionalCount(_ key: CodingKeys) throws -> UInt64? {
+            try container.decodeIfPresent(UInt64.self, forKey: key)
+        }
+        func optionalDouble(_ key: CodingKeys) throws -> Double? {
+            try container.decodeIfPresent(Double.self, forKey: key)
+        }
 
         flowCount = try int(.flowCount)
         processCount = try int(.processCount)
@@ -293,6 +414,19 @@ public struct WireStatistics: Codable, Sendable, Hashable {
         totalBytesIn = try count(.totalBytesIn)
         packetsCaptured = try count(.packetsCaptured)
         packetsDropped = try count(.packetsDropped)
+        measuredFlowCount = try optionalInt(.measuredFlowCount)
+        measuredByteShare = try optionalDouble(.measuredByteShare)
+        medianRttMs = try optionalDouble(.medianRttMs)
+        minRttMs = try optionalDouble(.minRttMs)
+        retransmitRateOut = try optionalDouble(.retransmitRateOut)
+        retransmitRateIn = try optionalDouble(.retransmitRateIn)
+        unmeasurableFlowCount = try optionalInt(.unmeasurableFlowCount)
+        unmeasurableBytes = try optionalCount(.unmeasurableBytes)
+        connectionAttempts = try optionalInt(.connectionAttempts)
+        connectionTimeouts = try optionalInt(.connectionTimeouts)
+        connectionRefusals = try optionalInt(.connectionRefusals)
+        discardedRttSamples = try optionalCount(.discardedRttSamples)
+        segmentOffloadFlowCount = try optionalInt(.segmentOffloadFlowCount)
         warnings = try strings(.warnings)
         interfaceTransitions = try strings(.interfaceTransitions)
     }
@@ -362,8 +496,23 @@ extension FlowKey {
 
 extension Flow {
     /// Builds the wire form of a flow.
-    public func wireRepresentation() -> WireFlow {
+    ///
+    /// `measuringQuality` defaults to false, and the default is the safe direction: with
+    /// measurement off every counter in `quality` is legitimately zero, and publishing
+    /// those zeros would tell a reader that a connection had no retransmissions when in
+    /// truth nothing looked. Absence is the honest wire form of "did not measure".
+    public func wireRepresentation(measuringQuality: Bool = false) -> WireFlow {
         let relay = NameResolutionCache.classify(hostName: hostName) == .privateRelay
+
+        // Round trips need a sample; segment counts only need the conversation to have
+        // been TCP. The two are gated separately so a TCP flow that never yielded a round
+        // trip still reports its loss counters, which are real regardless.
+        let sampled = measuringQuality && quality.rtt.sampleCount > 0
+        let counted = measuringQuality && (quality.segmentsOut + quality.segmentsIn) > 0
+        func milliseconds(_ interval: TimeInterval?) -> Double? {
+            interval.map { $0 * 1000 }
+        }
+
         return WireFlow(
             id: key.wireID,
             processName: owner?.name,
@@ -397,7 +546,18 @@ extension Flow {
             initiationIsCertain: initiationIsCertain,
             security: security?.security,
             protocolName: security?.protocolName,
-            securityIsProof: security.map(\.isProof)
+            securityIsProof: security.map(\.isProof),
+            rttMs: sampled ? milliseconds(quality.rtt.smoothed) : nil,
+            rttMinMs: sampled ? milliseconds(quality.rtt.minimum) : nil,
+            rttVarMs: sampled ? milliseconds(quality.rtt.variation) : nil,
+            rttSource: sampled ? quality.rttSource?.name : nil,
+            retransmitsOut: counted ? quality.retransmitsOut : nil,
+            retransmitsIn: counted ? quality.retransmitsIn : nil,
+            retransmitsAreProven: counted ? quality.retransmitsAreProven : nil,
+            arrivalJitterMs: quality.arrivalSpacingIsMeaningful
+                ? milliseconds(quality.arrivalSpacingVariation) : nil,
+            hopCount: quality.hopCount.map(Int.init),
+            segmentOffload: quality.sawSegmentOffload ? true : nil
         )
     }
 }

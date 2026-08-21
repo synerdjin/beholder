@@ -158,11 +158,58 @@ public struct Flow: Sendable {
     /// an inference rather than an observation.
     public private(set) var initiationIsCertain = false
 
+    /// How this conversation's packets travelled: round trips, repeats, arrival spacing.
+    ///
+    /// Always present but only filled in when measurement is on. An untouched value reads
+    /// as "nothing measured", which is the same thing an unmeasurable conversation reads
+    /// as — and both are published as absence rather than as zero, because a zero here
+    /// would be indistinguishable from a perfect connection.
+    public var quality = FlowQuality()
+
+    /// How this conversation's far end is grouped in the per-minute time series.
+    ///
+    /// The autonomous system when one is known, because that is the unit of *independent
+    /// network*. The whole ISP question turns on being able to say "three networks sharing
+    /// nothing but my uplink all slowed at once", and grouping by hostname or by address
+    /// would defeat it: a hundred addresses behind one CDN are one network, and counting
+    /// them as a hundred would make a single CDN's bad afternoon look like everything
+    /// failing together.
+    ///
+    /// Stored rather than computed because it is read on every packet, and building
+    /// "AS15169" afresh each time would put a string allocation on the hot path. Updated
+    /// when the network operator is learned, which happens once per flow.
+    public private(set) var destinationGroupKey: String
+
+    /// The human-readable name for that group.
+    ///
+    /// Computed, unlike the key. The hot-path argument above is about `"AS15169"`, which
+    /// really is built per packet if it is not stored; the label is a plain copy of a
+    /// `String?` the flow already holds, so storing it bought a redundant field per flow
+    /// and an invariant between two fields that could drift.
+    public var destinationGroupLabel: String? { networkOperator?.organization }
+
+    /// True when Beholder itself sent this traffic — which today means `--probe`.
+    ///
+    /// A property of the flow rather than a test applied at one call site, because the
+    /// exclusion has to hold everywhere the flow is read: the per-minute series, the live
+    /// summary, and the history table. Set once, when the flow is first seen.
+    public var isSelfOriginated = false
+
     public init(key: FlowKey, interfaceName: String, at timestamp: Date) {
         self.key = key
         self.interfaceName = interfaceName
         self.firstSeen = timestamp
         self.lastSeen = timestamp
+        self.destinationGroupKey = Flow.addressGroup(for: key.remote)
+    }
+
+    /// Adopts the network operator, and with it the grouping the time series uses.
+    ///
+    /// The two move together so a flow cannot end up filed under its address prefix while
+    /// claiming to know which network it is talking to.
+    public mutating func adoptNetworkOperator(_ network: NetworkOperator) {
+        networkOperator = network
+        destinationGroupKey = "AS\(network.number)"
     }
 
     /// macOS allocates ephemeral client ports from here upward
@@ -201,6 +248,28 @@ public struct Flow: Sendable {
     /// True once a FIN or RST has been seen, meaning the conversation is winding down.
     public var isClosing: Bool {
         tcpFlagsSeen.isConnectionClose
+    }
+
+    /// Folds a captured packet in, counting it and — when asked — measuring it.
+    ///
+    /// The two are kept separate below because counting must never be optional: the byte
+    /// totals are the thing Beholder exists to be right about, and they are computed the
+    /// same way whether or not anything is measuring quality.
+    @discardableResult
+    public mutating func record(
+        _ packet: ParsedPacket,
+        direction: FlowDirection,
+        at timestamp: Date,
+        measuringQuality: Bool
+    ) -> QualityEvent? {
+        record(
+            direction: direction,
+            wireBytes: packet.wireBytes,
+            tcpFlags: packet.tcpFlags,
+            at: timestamp
+        )
+        guard measuringQuality else { return nil }
+        return quality.record(packet, direction: direction)
     }
 
     public mutating func record(

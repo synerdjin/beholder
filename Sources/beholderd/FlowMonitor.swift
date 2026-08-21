@@ -18,7 +18,7 @@ final class FlowMonitor: @unchecked Sendable {
     private let attributionQueue = DispatchQueue(label: "com.beholder.attribution", qos: .utility)
 
     // Confined to flowQueue.
-    private let table = FlowTable()
+    private let table: FlowTable
     private let names = NameResolutionCache()
     /// The opening bytes of unencrypted connections. Nil unless `--read-cleartext` was
     /// given, which is what keeps the default run exactly as it always was: no payload is
@@ -36,6 +36,15 @@ final class FlowMonitor: @unchecked Sendable {
     /// Nil when history is disabled or the database could not be opened. Losing history
     /// is a nuisance; refusing to capture over it would be worse.
     private var store: FlowStore?
+    /// Per-minute measurement waiting to be written. Nil when nothing is measuring.
+    private let qualityBuckets: QualityAccumulator?
+    private var qualityTimer: DispatchSourceTimer?
+    /// Connection attempts already counted as failures, so a flow looked at on several
+    /// enrichment passes before it retires is not blamed once per pass.
+    ///
+    /// Culled when a flow retires. The daemon runs for weeks, so anything keyed by flow
+    /// and never emptied is a slow leak rather than a bounded cache.
+    private var reportedTimeouts: Set<FlowKey> = []
     private var lastPrunedAt = Date.distantPast
     private(set) var flowsPersisted: UInt64 = 0
 
@@ -71,17 +80,53 @@ final class FlowMonitor: @unchecked Sendable {
     /// connections opens at once — a page load can create dozens in a few milliseconds.
     private static let onDemandMinimumGap: TimeInterval = 0.025
 
-    init(readCleartext: Bool = false) {
+    /// The addresses the prober is currently echoing, so its own packets can be recognised
+    /// when pcap hands them straight back.
+    ///
+    /// flowQueue-confined, and refreshed every round rather than read once: the gateway is
+    /// one of the targets and it moves the moment a VPN comes up.
+    private var probeTargets: Set<IPAddress> = []
+
+    /// The prober, when there is one.
+    ///
+    /// Held here rather than in `main()` for two reasons: `dispatchMain()` never returns,
+    /// so a local would be free to be released while the process carried on running and
+    /// silently stopped probing; and it has to be cancelled before the store is closed, or
+    /// a round in flight would write to a closed database.
+    private var prober: Prober?
+
+    func attach(prober: Prober) {
+        self.prober = prober
+        let targets = Set(prober.currentTargets().map(\.address))
+        flowQueue.async { self.probeTargets = targets }
+        prober.start()
+    }
+
+    init(readCleartext: Bool = false, measureQuality: Bool = true) {
         self.localAddresses = LocalAddresses.current()
         self.excerpts = readCleartext ? PayloadExcerptStore() : nil
         // Read once here rather than through the optional on every packet: the capture
         // callback runs on its own queue and must not touch flowQueue-confined state.
         self.isReadingCleartext = readCleartext
+        self.isMeasuringQuality = measureQuality
+        self.table = FlowTable(measuresQuality: measureQuality)
+        self.qualityBuckets = measureQuality ? QualityAccumulator() : nil
     }
 
     /// Whether payload copying is on. Immutable after init, so the capture queue may read
     /// it without synchronisation — unlike `excerpts`, which belongs to flowQueue.
     private let isReadingCleartext: Bool
+
+    /// Whether per-flow quality is being measured.
+    ///
+    /// Unlike payload reading this is on by default, and the asymmetry is the point.
+    /// Reading cleartext touches the *contents* of traffic, so it is opt-in and announced.
+    /// Measuring quality reads only header fields the kernel has already handed over,
+    /// learns nothing about what anyone is doing, and costs a few hundred bytes a flow.
+    /// More to the point, it has to be running when the trouble happens: a switch you flip
+    /// after the connection went bad has nothing to tell you about the connection going
+    /// bad.
+    private let isMeasuringQuality: Bool
 
     /// The handler to give `CaptureEngine`.
     ///
@@ -106,16 +151,58 @@ final class FlowMonitor: @unchecked Sendable {
                 let result = self.table.record(
                     packet,
                     interfaceName: interfaceName,
-                    localAddresses: self.localAddresses
+                    localAddresses: self.localAddresses,
+                    at: packet.timestamp
                 )
                 if let observation {
                     self.apply(observation, to: result.key, direction: result.direction)
+                }
+                // Marked once, when the flow first appears, so every later reader — the
+                // series, the live summary, the history table — can leave it out by asking
+                // the flow rather than by repeating this test.
+                if result.isNew, self.isOwnTraffic(result.key) {
+                    self.table.markSelfOriginated(result.key)
+                }
+                if let event = result.quality, let buckets = self.qualityBuckets,
+                    !result.isSelfOriginated
+                {
+                    // Attributed to the minute the packet arrived in, using the capture
+                    // timestamp rather than the clock now — the difference is the whole
+                    // point of a series meant to answer "was it bad at eight on Tuesday".
+                    buckets.record(
+                        event,
+                        flow: result.key,
+                        interface: interfaceName,
+                        group: result.destinationGroup,
+                        label: result.destinationLabel,
+                        at: packet.timestamp
+                    )
                 }
                 if result.isNew {
                     self.requestImmediateAttribution()
                 }
             }
         }
+    }
+
+    /// Whether a flow is this daemon's own doing. Runs on flowQueue.
+    ///
+    /// Probes are real packets and pcap captures them like any other, so without this the
+    /// prober would appear in its own measurements — inflating the byte totals and, worse,
+    /// contributing round trips to the very series it exists to keep honest.
+    ///
+    /// Recognised by target rather than by a capture filter. A filter on the probe
+    /// addresses would also hide genuine traffic to them, which on anycast resolvers is
+    /// exactly the DNS this machine does all day.
+    ///
+    /// This used to ask the flow table for the owning PID and compare it with our own,
+    /// which could never be true: `Attributor.owner` begins `guard packet.transport
+    /// .hasPorts`, and ICMP has no ports, so a probe flow never acquires an owner at all.
+    /// The exclusion the design notes promise was therefore not happening. The prober is
+    /// the only thing that knows which echoes are its own, so it says so directly.
+    private func isOwnTraffic(_ key: FlowKey) -> Bool {
+        guard !probeTargets.isEmpty, key.transport == .icmp else { return false }
+        return probeTargets.contains(key.remote)
     }
 
     /// Runs on flowQueue.
@@ -237,20 +324,110 @@ final class FlowMonitor: @unchecked Sendable {
         }
         addressTimer = addresses
         addresses.resume()
+
+        // The per-minute series is flushed on its own timer rather than when flows retire.
+        // The existing `rollups` table does the latter and shows why not to: it keys on the
+        // minute a flow *ended*, so a download running from eight until midnight lands
+        // wholly in the midnight bucket, and a chart of the evening shows nothing.
+        if qualityBuckets != nil {
+            let quality = DispatchSource.makeTimerSource(queue: flowQueue)
+            quality.schedule(deadline: .now() + 60, repeating: 60, leeway: .seconds(5))
+            quality.setEventHandler { [weak self] in self?.flushQuality(at: Date()) }
+            qualityTimer = quality
+            quality.resume()
+        }
+    }
+
+    /// Writes out every minute that has certainly finished. Runs on flowQueue.
+    private func flushQuality(at now: Date, closedOnly: Bool = true) {
+        guard let qualityBuckets, let store else { return }
+        let drained =
+            closedOnly ? qualityBuckets.drainClosedMinutes(now: now) : qualityBuckets.drainAll()
+        guard !drained.isEmpty else { return }
+
+        let rows = drained.map { qualityBuckets.row(for: $0.key, $0.bucket) }
+        do {
+            try store.recordQuality(rows)
+        } catch {
+            if storeErrorReported == false {
+                storeErrorReported = true
+                FileHandle.standardError.write(
+                    Data("beholderd: cannot write quality history: \(error)\n".utf8)
+                )
+            }
+        }
+    }
+
+    /// Files connections that were opened and never answered against the minute they were
+    /// *attempted* in, not the minute we gave up on them.
+    ///
+    /// Runs on flowQueue during the enrichment pass, so a failure is noticed while it is
+    /// still recent. Writing straight to the store rather than into the accumulator is
+    /// deliberate: the attempt's minute may already have been flushed, and the row upsert
+    /// is what lets a late fact join a minute already on disk.
+    private func recordConnectionTimeouts(at now: Date) {
+        guard isMeasuringQuality, let store else { return }
+
+        var rows: [QualityMinute] = []
+        // The predicate itself lives on `Flow` in Core, shared with `QualitySummary`, so
+        // the live reading and the persisted series cannot disagree about what a timeout
+        // is. What stays here is only the once-per-flow bookkeeping and the write.
+        table.forEachActive { flow in
+            guard !flow.isSelfOriginated,
+                flow.connectionTimedOut(at: now),
+                !reportedTimeouts.contains(flow.key)
+            else { return }
+
+            reportedTimeouts.insert(flow.key)
+            rows.append(
+                QualityMinute(
+                    minute: QualityAccumulator.minute(of: flow.firstSeen),
+                    interface: flow.interfaceName,
+                    destinationGroup: flow.destinationGroupKey,
+                    destinationLabel: flow.destinationGroupLabel,
+                    connectionTimeouts: 1
+                )
+            )
+        }
+        guard !rows.isEmpty else { return }
+        _ = try? store.recordQuality(rows)
     }
 
     func stop() {
+        // First, so no round in flight can write to a store that is about to close.
+        prober?.stop()
+        prober = nil
         attributionTimer?.cancel()
         attributionTimer = nil
         addressTimer?.cancel()
         addressTimer = nil
+        qualityTimer?.cancel()
+        qualityTimer = nil
         saveNameCache()
         // Anything still live at shutdown never retired, so it would otherwise be lost.
         flowQueue.sync {
             guard let store else { return }
+            // The minute in progress included, since the alternative is losing it.
+            flushQuality(at: Date(), closedOnly: false)
             let remaining = table.activeFlows() + table.drainRetired()
             _ = try? store.record(remaining)
             store.close()
+        }
+    }
+
+    /// Files a round of probe results. Hops onto flowQueue, which owns the store.
+    func recordProbes(_ results: [ProbeResult]) {
+        flowQueue.async {
+            // Unioned rather than replaced: a round that got no reply from a target still
+            // sent to it, and those packets are still ours. The set stays small — three
+            // fixed anchors and however many gateways this machine has seen.
+            for result in results {
+                if let address = IPAddress(text: result.target) {
+                    self.probeTargets.insert(address)
+                }
+            }
+            guard let store = self.store else { return }
+            _ = try? store.recordProbes(results)
         }
     }
 
@@ -333,18 +510,22 @@ final class FlowMonitor: @unchecked Sendable {
         // Ask about anything still nameless. Cheapest source first means this only ever
         // sees what SNI and observed DNS could not account for.
         if let reverseResolver {
-            for flow in table.activeFlows()
-            where flow.hostName == nil && flow.key.remote.isGloballyRoutable {
+            table.forEachActive { flow in
+                guard flow.hostName == nil, flow.key.remote.isGloballyRoutable else { return }
                 reverseResolver.request(flow.key.remote)
             }
         }
 
+        recordConnectionTimeouts(at: now)
         let expired = table.expire(at: now)
         // Release payload as soon as a conversation is over, rather than waiting for
         // eviction pressure. This is the one structure in Beholder holding the contents of
         // traffic, so it should hold as little of it, for as short a time, as it can.
         if let excerpts {
             for flow in expired { excerpts.forget(flow.key) }
+        }
+        if !reportedTimeouts.isEmpty {
+            for flow in expired { reportedTimeouts.remove(flow.key) }
         }
         persistRetiredFlows(at: now)
         names.expire(at: now)
@@ -356,7 +537,10 @@ final class FlowMonitor: @unchecked Sendable {
     /// writing it earlier would mean rewriting it as its counters grew.
     private func persistRetiredFlows(at now: Date) {
         guard let store else { return }
-        let retired = table.drainRetired()
+        // Probes are excluded here too, not only from the series. A history table that
+        // recorded Beholder's own echoes would answer "what did this machine talk to on
+        // Tuesday" with Beholder.
+        let retired = table.drainRetired().filter { !$0.isSelfOriginated }
         if !retired.isEmpty {
             do {
                 try store.record(retired)
@@ -378,6 +562,7 @@ final class FlowMonitor: @unchecked Sendable {
         if now.timeIntervalSince(lastPrunedAt) > 3600 {
             lastPrunedAt = now
             _ = try? store.prune(now: now)
+            _ = try? store.pruneQuality(now: now)
         }
     }
 
@@ -454,6 +639,9 @@ final class FlowMonitor: @unchecked Sendable {
         var cleartextFlowCount: Int
         var unknownSecurityFlowCount: Int
         var encryptedFlowCount: Int
+        /// Nil when measurement is off, so the published statistics can distinguish
+        /// "nothing was measuring" from "measured, and found nothing".
+        var quality: QualitySummary?
     }
 
     /// Builds the published form of the current state.
@@ -486,15 +674,57 @@ final class FlowMonitor: @unchecked Sendable {
         statistics.cleartextFlowCount = current.cleartextFlowCount
         statistics.unknownSecurityFlowCount = current.unknownSecurityFlowCount
         statistics.encryptedFlowCount = current.encryptedFlowCount
-        statistics.warnings = ProxyDetection.findLikelyProxies(in: current.flows)
-            .map(\.advice)
+
+        var qualityWarnings: [String] = []
+        if let quality = current.quality {
+            statistics.measuredFlowCount = quality.measuredFlowCount
+            statistics.unmeasurableFlowCount = quality.unmeasurableFlowCount
+            statistics.unmeasurableBytes = quality.unmeasurableBytes
+            statistics.measuredByteShare = quality.measuredByteShare
+            statistics.medianRttMs = quality.medianRTT.map { $0 * 1000 }
+            statistics.minRttMs = quality.minimumRTT.map { $0 * 1000 }
+            statistics.retransmitRateOut = quality.retransmitRateOut
+            statistics.retransmitRateIn = quality.retransmitRateIn
+            statistics.connectionAttempts = quality.connectionAttempts
+            statistics.connectionTimeouts = quality.connectionTimeouts
+            statistics.connectionRefusals = quality.connectionRefusals
+            statistics.discardedRttSamples = quality.discardedSamples
+            statistics.segmentOffloadFlowCount = quality.segmentOffloadFlowCount
+
+            // A latency figure covering a minority of the traffic is a different object
+            // from one covering nearly all of it, and the difference is invisible in the
+            // number itself. Said out loud rather than left to be inferred from a ratio
+            // the reader would have to go looking for.
+            if let share = quality.measuredByteShare, share < 0.5, quality.measuredFlowCount > 0 {
+                qualityWarnings.append(
+                    "Latency and loss below cover \(Int((share * 100).rounded()))% of the "
+                        + "bytes moved. The rest is QUIC or other UDP traffic, which carries "
+                        + "no round trips a passive observer can read."
+                )
+            }
+            if quality.segmentOffloadFlowCount > 0 {
+                let count = quality.segmentOffloadFlowCount
+                qualityWarnings.append(
+                    "\(pluralised(Int(count), "connection")) arrived with segments coalesced "
+                        + "by the interface, so their segment and retransmission counts are "
+                        + "undercounts."
+                )
+            }
+        }
+        // Assigned first and appended to after, rather than the other way round. These two
+        // caveats were being appended to `warnings` and then thrown away wholesale by this
+        // assignment, so neither had ever reached a screen — which is the failure the
+        // "caveats travel with the data" rule exists to prevent, arriving by way of a line
+        // of code rather than a decision.
+        statistics.warnings =
+            ProxyDetection.findLikelyProxies(in: current.flows).map(\.advice) + qualityWarnings
 
         let payload = publishableExcerpts()
         if payload.dropped > 0 {
             statistics.warnings.append(
                 """
                 Payload for \(payload.dropped) unencrypted \
-                \(payload.dropped == 1 ? "connection is" : "connections are") not shown: \
+                \(agreeing(payload.dropped, "connection is", "connections are")) not shown: \
                 this snapshot reached its \
                 \(WireProtocol.maximumExcerptBytesPerSnapshot / 1024) KB payload limit.
                 """
@@ -504,7 +734,7 @@ final class FlowMonitor: @unchecked Sendable {
             statistics.warnings.append(
                 """
                 Payload for \(payload.evicted) earlier \
-                \(payload.evicted == 1 ? "connection was" : "connections were") released to \
+                \(agreeing(payload.evicted, "connection was", "connections were")) released to \
                 stay within the \(PayloadExcerptStore.maximumFlows)-connection buffer.
                 """
             )
@@ -514,7 +744,7 @@ final class FlowMonitor: @unchecked Sendable {
             generatedAt: Date(),
             startedAt: startedAt,
             interfaces: interfaces,
-            flows: current.flows.map { $0.wireRepresentation() },
+            flows: current.flows.map { $0.wireRepresentation(measuringQuality: isMeasuringQuality) },
             statistics: statistics,
             cleartextExcerpts: payload.excerpts
         )
@@ -631,7 +861,9 @@ final class FlowMonitor: @unchecked Sendable {
                 reverseLookupsSucceeded: reverseStatistics.succeeded,
                 cleartextFlowCount: cleartext,
                 unknownSecurityFlowCount: unknownSecurity,
-                encryptedFlowCount: encrypted
+                encryptedFlowCount: encrypted,
+                quality: isMeasuringQuality
+                    ? QualitySummary.summarise(flows, at: Date()) : nil
             )
         }
     }

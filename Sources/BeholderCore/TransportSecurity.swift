@@ -167,6 +167,7 @@ public enum ProtocolSniffer {
         }
         if isQUICLongHeader(payload) { return proven(.encrypted, "QUIC") }
         if isDTLS(payload) { return proven(.encrypted, "DTLS") }
+        if isWireGuard(payload, packet: packet) { return proven(.encrypted, "WireGuard") }
         return findings
     }
 
@@ -191,6 +192,54 @@ public enum ProtocolSniffer {
     private static func isQUICLongHeader(_ payload: UnsafeRawBufferPointer) -> Bool {
         guard payload.count >= 5 else { return false }
         return (payload[0] & 0xC0) == 0xC0
+    }
+
+    /// A WireGuard message: a type byte, three reserved zero bytes, and a body whose
+    /// length the type fixes.
+    ///
+    /// This is a stronger reading than the TLS record header above, not a weaker one. A
+    /// TLS record says a handshake was attempted; a WireGuard transport-data message only
+    /// exists once the Noise handshake has *completed*, since the counter it carries is
+    /// the nonce for a key both ends already derived.
+    ///
+    /// It earns its place for a second reason. Left unrecognised, a tunnel was the largest
+    /// UDP conversation on any machine running a VPN — NordLynx, Tailscale and wg-quick
+    /// all speak this, the first two over loopback — and `unknown` does not exempt a packet
+    /// from `PayloadInspector.shouldCopy`. So the excerpt store spent 4 KB of a bounded
+    /// 64-flow buffer holding ciphertext nothing will ever read, evicting the cleartext
+    /// connections the buffer exists for. Recognising it is what stops the copy.
+    ///
+    /// The three reserved bytes are what make this safe to claim. A type byte alone would
+    /// match any binary payload opening with a small integer; three zeros behind it and a
+    /// length the protocol fixes do not line up by accident.
+    private static func isWireGuard(
+        _ payload: UnsafeRawBufferPointer,
+        packet: ParsedPacket
+    ) -> Bool {
+        guard payload.count >= 4, payload[1] == 0, payload[2] == 0, payload[3] == 0 else {
+            return false
+        }
+
+        // The IP header's own figure, because snaplen truncates the captured buffer and
+        // Ethernet padding inflates it — the same reason the retransmission arithmetic
+        // uses it. A full-MTU transport-data packet is cut short by the 1024-byte snaplen,
+        // and measuring the length off the buffer would have failed on exactly the packets
+        // that carry the most. Falls back to the buffer for fixtures predating the field.
+        let length = packet.transportPayloadLength > 0
+            ? packet.transportPayloadLength
+            : payload.count
+
+        switch payload[0] {
+        case 1: return length == 148  // handshake initiation
+        case 2: return length == 92  // handshake response
+        case 3: return length == 64  // cookie reply
+        case 4:
+            // Transport data: a 16-byte header, then the encapsulated packet padded to a
+            // 16-byte boundary, then a 16-byte Poly1305 tag. The shortest legal one is 32
+            // bytes and carries no packet at all — that is a keepalive.
+            return length >= 32 && length % 16 == 0
+        default: return false
+        }
     }
 
     /// A DTLS record: the TLS content types, but with a version of 0xFE (1's complement of

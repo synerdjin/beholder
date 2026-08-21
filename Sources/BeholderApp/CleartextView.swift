@@ -206,9 +206,29 @@ private struct NothingExposedView: View {
 /// that distinction this note could not be told apart from "we looked and there was
 /// nothing there".
 private struct PayloadDisabledNote: View {
-    private let command = "sudo beholderd --serve --read-cleartext"
-
+    /// `beholderd` is never on `$PATH`. Installed it is `/usr/local/libexec/beholderd`,
+    /// and from a checkout it is `.build/<config>/beholderd` — so the bare
+    /// `sudo beholderd --serve --read-cleartext` this used to offer was a command that
+    /// could not be run anywhere, copy button and all.
+    ///
+    /// Nor is "start a daemon with the flag" the instruction when one is installed: the
+    /// launchd job already holds the socket, a second daemon refuses rather than stealing
+    /// it, and KeepAlive restarts the first one after a kill. Reinstalling with the flag
+    /// is the only way in, which is why the two cases get different commands.
     var body: some View {
+        // Asked each time the note is drawn rather than cached for the process lifetime:
+        // this app stays open for days, and a value read once at launch is wrong from the
+        // moment someone installs or removes the daemon underneath it.
+        let isInstalled = BeholderPaths.isInstalledAsDaemon()
+        let command =
+            isInstalled
+            ? "sudo ./Scripts/install-daemon.sh --read-cleartext"
+            : "make cleartext"
+
+        return content(command: command, isInstalled: isInstalled)
+    }
+
+    private func content(command: String, isInstalled: Bool) -> some View {
         VStack(spacing: 6) {
             Text("This daemon is not reading payload.")
                 .font(.callout)
@@ -231,6 +251,17 @@ private struct PayloadDisabledNote: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
             .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+            // The command is repo-relative because the daemon is only ever built from
+            // source; saying where to run it costs a line and saves the guess.
+            Text(
+                isInstalled
+                    ? "Run from the Beholder checkout. This replaces the installed "
+                        + "daemon, which keeps capturing at boot."
+                    : "Run from the Beholder checkout."
+            )
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.center)
         }
     }
 }
@@ -332,27 +363,23 @@ private struct PayloadReader: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    @ViewBuilder
     private var content: some View {
-        if bytes.isEmpty {
-            Text("Nothing captured in this direction.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
-                    if let message = HTTPPreview.parse(bytes) {
-                        HTTPSection(message: message)
-                        Divider()
-                    }
-                    Text(HexDump.render(bytes))
-                        .font(.system(size: 11, design: .monospaced))
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(12)
+        // Read once. `bytes` rebuilds an array out of `Data` on every access, and this
+        // redraws once a second for as long as the connection is selected.
+        let current = bytes
+        return Group {
+            if current.isEmpty {
+                Text("Nothing captured in this direction.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                // `.equatable()` is what keeps the parses off the once-a-second path. The
+                // array arrives freshly allocated every snapshot, so SwiftUI's structural
+                // comparison always sees a change and re-enters the body — which now means
+                // re-inflating a gzip body for bytes that did not move. Comparing the
+                // arrays is a memcmp; decompressing them is not.
+                ExcerptBody(bytes: current).equatable()
             }
         }
     }
@@ -389,6 +416,119 @@ private struct PayloadReader: View {
 
 // MARK: - HTTP
 
+/// What an excerpt turned out to hold, above the bytes themselves.
+///
+/// A view of its own so each parse happens once per redraw rather than once per reference:
+/// `bytes` rebuilds an array out of `Data` every time it is read, and both previews walk
+/// the whole thing. The hex dump stays regardless — a decode is a reading of the bytes and
+/// never a replacement for them, and the two disagreeing is exactly what someone looking
+/// at this screen needs to be able to see.
+private struct ExcerptBody: View, Equatable {
+    let bytes: [UInt8]
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
+                switch PayloadPreview.of(bytes) {
+                case .http(let message):
+                    HTTPSection(message: message)
+                    Divider()
+                case .dns(let messages):
+                    DNSSection(messages: messages)
+                    Divider()
+                case .unrecognised:
+                    EmptyView()
+                }
+                Text(HexDump.render(bytes))
+                    .font(.system(size: 11, design: .monospaced))
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12)
+        }
+    }
+}
+
+/// Decoded DNS and mDNS messages.
+///
+/// Worth the screen space because mDNS is most of what a Mac says on a local network, and
+/// as raw bytes it is the least readable thing in this view despite being entirely plain
+/// text: a service announcement carries its whole configuration in TXT strings — device
+/// identifiers, model, capability flags — every one of which is legible to anyone on the
+/// same network.
+private struct DNSSection: View {
+    let messages: [DNSPreview.Message]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ForEach(Array(messages.enumerated()), id: \.offset) { _, message in
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(message.summary)
+                        .font(.system(size: 12, design: .monospaced))
+                        .fontWeight(.medium)
+                        .textSelection(.enabled)
+
+                    ForEach(Array(message.questions.enumerated()), id: \.offset) { _, question in
+                        entry(
+                            name: question.name,
+                            detail: question.type
+                                + (question.wantsUnicastReply ? " · unicast reply" : ""),
+                            values: []
+                        )
+                    }
+
+                    ForEach(Array(message.records.enumerated()), id: \.offset) { _, record in
+                        entry(
+                            name: record.name,
+                            detail: record.type
+                                + (record.section == .answer ? "" : " · \(record.section.rawValue)")
+                                + " · ttl \(record.timeToLive)"
+                                + (record.isCacheFlush ? " · cache-flush" : "")
+                                + (record.isTruncated ? " · cut short" : ""),
+                            values: record.values
+                        )
+                    }
+
+                    // Every report states the window it covers. A message showing six of
+                    // eighteen answers without this reads as "six things were announced".
+                    if message.isIncomplete {
+                        Text(
+                            "Records continue past what was captured — "
+                                + "\(message.records.count) of "
+                                + "\(message.declaredCounts.recordTotal) read."
+                        )
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
+    private func entry(name: String, detail: String, values: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(name)
+                .font(.system(size: 11, design: .monospaced))
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(detail)
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(.secondary)
+            // Shown exactly as they arrived, for the same reason HTTP header values are.
+            ForEach(Array(values.enumerated()), id: \.offset) { _, value in
+                Text(value)
+                    .font(.system(size: 11, design: .monospaced))
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 14)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.leading, 8)
+    }
+}
+
 private struct HTTPSection: View {
     let message: HTTPPreview.Message
 
@@ -424,6 +564,23 @@ private struct HTTPSection: View {
                 Text("Headers continue past what was captured.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+            }
+
+            if let body = message.body {
+                Divider()
+                // The note comes first, not last. A decoded body is the one thing here that
+                // did not arrive looking the way it is shown — gzip undone, chunks removed —
+                // and reading it without knowing that is how a partial body gets taken for a
+                // whole one.
+                Text(body.note)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                if let text = body.text {
+                    Text(text)
+                        .font(.system(size: 11, design: .monospaced))
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
     }

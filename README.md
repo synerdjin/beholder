@@ -3,7 +3,11 @@
 A network traffic visualizer for macOS — see which process on your laptop is talking to
 whom, where in the world that is, and how much data is moving.
 
-Inspired by Little Snitch's Network Monitor. **Beholder observes; it does not block.**
+Inspired by Little Snitch's Network Monitor. **Beholder observes; it does not block.** It
+also measures how well the network is working — latency, retransmissions, jitter — and can
+tell you whether a bad stretch was your connection's fault or the far end's. It watches
+rather than sends, with exactly one opt-in exception described under
+[Measuring the connection](#measuring-the-connection).
 
 ```bash
 git clone https://github.com/synerdjin/beholder.git && cd beholder
@@ -366,9 +370,42 @@ What bounds it instead:
   `live_connections` and nothing else. No tool returns payload, and none should: it would
   mean sending exactly the credentials above to an assistant on any turn.
 
+What the reader shows depends on what the bytes turn out to be. HTTP is displayed as its
+start line, its header block and its body, and DNS — which on a Mac means mostly mDNS — as its records:
+the service name, the type, its time to live, and for a TXT record every string it carries.
+An AirPlay or AirPrint announcement is entirely plain text and entirely unreadable as hex,
+which is a poor way to show something every machine on the same network can read. The hex
+dump stays below the decode rather than being replaced by it; a decode is a reading of the
+bytes, and the two disagreeing is exactly what someone at this screen needs to be able to
+see.
+
+A body gets whatever has to come off before it can be read: chunked transfer framing first,
+then a `Content-Encoding` of `gzip` or `deflate`, using the zlib that ships with the system.
+This is the one place the "shallow parser" line has moved, and it moved for a specific
+reason: **a compressed body rendered as raw bytes is indistinguishable from ciphertext**,
+and being mistaken for encryption is precisely the failure this view exists to prevent.
+Compression is reversible without a key, so leaving it undone was reporting something as
+unreadable that had merely not been read. Encodings with no system library behind them —
+Brotli, zstd — are named rather than attempted.
+
+The same rules apply as everywhere else. A record type with no reader is reported as a byte
+count rather than guessed at, a record cut short by the 4 KB bound says so rather than
+presenting its surviving strings as the whole thing, a message showing one record of
+twenty-three says that too, and a body that decompressed to something that is not text —
+an image, an archive — is named rather than rendered, because a decoder that cannot fail is
+not evidence that what it produced is readable. A 4 KB excerpt of a larger body is a
+*truncated* deflate stream, which general-purpose decompression APIs reject outright as
+corrupt; the prefix is decoded and labelled `cut short by the excerpt` instead, since the
+prefix is the part worth reading.
+
 ```bash
-sudo ./.build/debug/beholderd --serve --read-cleartext
+make cleartext                                     # from a checkout
+sudo ./Scripts/install-daemon.sh --read-cleartext  # when the launchd job is the one capturing
 ```
+
+The second form exists because an installed daemon cannot be talked out of the way: it
+holds the socket, a second daemon refuses rather than stealing it, and `KeepAlive` restarts
+it after a kill. Re-running that script without the flag turns payload reading back off.
 
 **Cleartext is proof; encrypted is an inference; unknown is neither.** A plaintext protocol
 marker was read off the wire, so `cleartext` says something observed. `encrypted` rests on
@@ -384,6 +421,15 @@ One consequence worth knowing: a connection proven to carry cleartext stays repo
 way even if it later negotiates TLS. A STARTTLS session did carry bytes in the clear, and
 that does not stop being true.
 
+The way out of `unknown` is to learn the framing, not to relax the rule. WireGuard — which
+is what NordLynx and Tailscale speak, both of them over loopback — used to sit in the
+exposed list as an unidentified binary protocol, and on a machine with a VPN up it was the
+largest UDP conversation there. It is now read from its header: a message type, three
+reserved zero bytes, and a length the protocol fixes. That is a stronger claim than the TLS
+record header above rather than a weaker one, because a transport-data message only exists
+once the handshake has completed. It also stops the excerpt store spending its bounded 4 KB
+per direction on ciphertext, which was displacing the cleartext it exists to show.
+
 Hostnames arrive from the network, which means anyone who can make this machine resolve a
 name chooses a string that ends up in an assistant's context. They are sent as delimited
 data rather than prose, truncated to the length a real name can be, and stripped of
@@ -395,6 +441,21 @@ suspicious host has defeated its own purpose.
 
 - Very short-lived connections may show as "unknown" — an inherent race in socket-table
   polling that only a kernel-level filter avoids.
+- **QUIC carries no round trips a passive observer can read.** HTTP/3 runs over UDP and
+  exposes no sequence numbers, no acknowledgements and no handshake to time, so latency and
+  loss simply cannot be measured for it. That is a large and growing share of browser
+  traffic, which is why every figure in the Quality tab publishes what proportion of the
+  bytes it actually covers rather than quietly averaging over what it could see.
+- Retransmissions are counted, not dropped packets. From one end of a connection, an
+  acknowledgement lost on the way back looks exactly like data lost on the way out, so the
+  figure is a floor on loss rather than a measurement of it. It is labelled accordingly
+  everywhere it appears.
+- Passive measurement only covers paths actually used, while they were being used. A quiet
+  night is not evidence the connection was working, and it is not evidence it was not —
+  `--probe` exists because that is the only way to tell those apart.
+- macOS coalesces received segments before handing them to libpcap on some interfaces. Where
+  that happens, segment and retransmission counts are undercounts; Beholder detects it and
+  says so rather than reporting the low numbers as fact.
 - Hostnames are unavailable for connections using TLS Encrypted Client Hello.
 - Per-process **blocking** is out of scope; it cannot be built without the Apple
   entitlement described above.
@@ -415,7 +476,9 @@ suspicious host has defeated its own purpose.
 - Payload reading sees whole packets, not a reassembled stream. A request line split across
   a TCP segment boundary, or arriving out of order, will not match; in practice a request
   and its headers arrive in the first segment, which is why this is a limitation rather
-  than a defect. It is also why `unknown` exists.
+  than a defect. It is also why `unknown` exists. The same applies to a compressed body:
+  segments are appended in the order they were captured, so reordering corrupts the deflate
+  stream — which surfaces as "would not decode" rather than as plausible wrong text.
 - Nothing here decrypts anything. `encrypted` means Beholder can see that a connection is
   protected and therefore cannot read it — which is the answer, not a failure.
 - Unsigned, so installing the daemon needs a `sudo` script rather than `SMAppService`, and
@@ -517,7 +580,7 @@ ambiguous between "nothing happened" and "nothing was watching".
 The history database answers questions the History tab cannot phrase. Beholder ships an
 MCP server so an assistant can read it on your behalf — "what did Slack talk to
 overnight", "have I ever contacted this address", "what was the biggest thing this laptop
-downloaded this week".
+downloaded this week", "was my internet bad on Tuesday evening".
 
 ```bash
 make mcp
@@ -526,10 +589,19 @@ make mcp-add     # prints the claude mcp add line; run it yourself
 
 It is off until you register it, and `claude mcp remove beholder` ends it.
 
-Four tools: recorded history, one endpoint's whole story, a live snapshot, and a health
-check. Four rather than a dozen on purpose — every tool's description sits in the
-assistant's context on every turn of every conversation, including the ones that have
+Five tools: recorded history, one endpoint's whole story, a live snapshot, a health check,
+and network quality. Five rather than a dozen on purpose — every tool's description sits in
+the assistant's context on every turn of every conversation, including the ones that have
 nothing to do with networking, so the set is a budget rather than a catalogue.
+
+It was four for a long time. `network_quality` was added rather than folded into one of the
+others because it answers a different *kind* of question: the other four are all forms of
+"who talked to whom", keyed by identity and returning endpoints and byte counts, while this
+one is keyed by time and asks how well the path worked. Bending `network_history` to carry
+it would have given one tool two schemas wearing a trench coat, which costs the reader more
+than a fifth name does. Its answers carry their caveats — the window covered, the share of
+traffic that was measurable, and whether the numbers describe a VPN tunnel rather than the
+link beneath it.
 
 Answers are grouped, not dumped. Two days of capture here is 24,000 connection rows across
 480 hostnames — about thirty rows for every host-and-application pair, and over a thousand
@@ -551,6 +623,98 @@ The socket is mode 0600 and owned by whoever started capture. If that was a diff
 account the server gets `EACCES`, and `beholder_status` reports it as that — naming the
 uid that owns the socket — rather than as a daemon that is not running, because those two
 have entirely different fixes.
+
+## Measuring the connection
+
+Beholder measures how well the network is working, not just who is using it. This is on by
+default, needs no extra flag, and reads nothing beyond header fields the kernel has already
+handed over.
+
+What it measures, per connection:
+
+- **Round-trip time**, from three sources on a ladder of decreasing trust. The TCP timestamp
+  option is best — continuous, and unambiguous when a segment has been sent twice. The
+  handshake is the cleanest single sample there is: nothing but the path can delay an answer
+  to a SYN. Timing an acknowledgement is the fallback, and carries the far end's delayed-ACK
+  timer with it, which is why it ranks last.
+- **The minimum**, kept separately and shown first. The typical round trip includes whatever
+  delay the far end added before answering; the minimum over many samples is the closest a
+  passive observer gets to the path's real propagation delay. Everything above it is
+  queueing.
+- **Retransmissions**, per direction, because the directions answer different questions.
+  Data of yours resent means loss on the way out; data of theirs resent means loss on the
+  way in.
+- **Jitter** — RFC 6298's variation for TCP, and inter-arrival spacing for UDP, which is
+  labelled as the different thing it is.
+- **Connection outcomes**, keeping timeouts apart from refusals. A connection that got no
+  answer is evidence the path failed. One answered with a reset is the far end declining,
+  which is not the network's doing.
+
+`--no-quality` turns it off. The asymmetry with `--read-cleartext` is deliberate: payload
+reading touches the *contents* of traffic, so it is opt-in and announced. Measurement reads
+only headers and learns nothing about what anyone is doing. It is on by default for a second
+reason too — it has to be running when the trouble happens, and a switch you flip afterwards
+has nothing to say about a connection that has already gone bad.
+
+### Is it my ISP?
+
+A round trip to a server measures the whole path, so no single number can answer this. What
+can answer it is **common mode**: when several networks that share nothing except your uplink
+all slow down in the same minute, the thing they share is the thing at fault. When one slows
+down alone, it is that one.
+
+Beholder groups destinations by autonomous system precisely so this comparison is possible —
+a hundred addresses behind one CDN are one network, and counting them as a hundred would make
+any single CDN's bad afternoon look like everything failing at once. Each network gets its own
+baseline, and a minute is only judged against a network that contributed enough samples in it
+to be worth judging.
+
+The Quality tab's **Over time** half reports this, along with latency by hour of day (where
+evening congestion shows up and nowhere else), latency under load, and stretches where
+connections got no answer. It reads the database directly, so it works when nothing is
+capturing.
+
+It will not tell you your ISP was down. Passively, an outage and an idle laptop are the same
+observation. It will tell you that connections were attempted and failed, which is a
+different claim and a stronger one.
+
+### Latency under load
+
+Probably the most useful single reading here, and the one a speed test will never give you.
+A connection can hit its advertised rate and still feel broken because something between you
+and the exchange holds a large buffer that fills under load. Beholder can see it because it
+has both numbers for the same minute: latency at rest, and latency while the link is busy.
+
+Where the gap is large, the fix is usually fair queueing on your own router rather than
+anything your ISP can do.
+
+### `--probe`: the one thing that sends
+
+Everything above watches traffic somebody else asked for. That is enough for almost every
+question and deliberately not enough for two:
+
+- **Was the connection working while nobody was using it?** An outage at four in the morning
+  is indistinguishable from being asleep.
+- **Is it my Wi-Fi or my ISP?** Loss on the local radio and loss upstream of the router look
+  identical from the far end of a path that runs through both.
+
+`--probe` sends one ICMP echo to your default gateway and to a few fixed addresses every
+thirty seconds. Timing the first hop *separately* is the only way to split your own network
+from everything beyond it — a clean gateway with slow anchors puts the trouble upstream of
+your router; a slow gateway puts it on your own cable or radio.
+
+It is **off by default**, and when it is on the daemon says so on startup, naming its targets
+and interval. Beholder still does not block, alter, or interfere with anyone else's traffic —
+but with this flag it is no longer true that it only listens, and that distinction is worth
+stating rather than leaving to be discovered.
+
+Probes are excluded from Beholder's own measurements by process, not by a capture filter: a
+filter on those addresses would also hide the genuine DNS this machine sends to them all day.
+
+```bash
+sudo ./.build/debug/beholderd --serve --probe     # gateway plus the built-in anchors
+sudo ./.build/debug/beholderd --serve --probe --probe-target 192.0.2.1 --probe-interval 60
+```
 
 ## Capturing continuously
 

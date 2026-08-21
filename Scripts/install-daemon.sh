@@ -25,6 +25,55 @@ LABEL="com.beholder.daemon"
 PLIST="/Library/LaunchDaemons/${LABEL}.plist"
 INSTALLED_BINARY="/usr/local/libexec/beholderd"
 
+# Flags the installed job carries. Payload reading has to be requested here rather than
+# run by hand, because the launchd job is the only daemon that can serve: a second one
+# finds the socket answering and refuses rather than stealing it, and KeepAlive brings the
+# first one straight back after a kill. So "start it with --read-cleartext" is not an
+# instruction anyone can follow while this is installed — reinstalling with the flag is.
+READ_CLEARTEXT=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --read-cleartext) READ_CLEARTEXT=1 ;;
+        --no-read-cleartext) READ_CLEARTEXT=0 ;;
+        -h | --help)
+            echo "usage: $0 [--read-cleartext | --no-read-cleartext]"
+            echo
+            echo "  --read-cleartext  keep the opening 4 KB of each unencrypted"
+            echo "                    connection in memory, so the app's Cleartext view"
+            echo "                    can show what they carry. Off unless asked for."
+            echo
+            echo "  Given neither, an existing installation keeps whatever it had."
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            echo "usage: $0 [--read-cleartext | --no-read-cleartext]" >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
+
+# With neither flag, keep what the installed job already had.
+#
+# This script is the re-runnable update path — `make install` and `make wizard` both invoke
+# it with no arguments — so treating "no flag" as "off" meant any later update silently
+# stopped the daemon reading payload, without saying so and without being asked. Turning it
+# off is now something you ask for, exactly like turning it on.
+if [[ -z "${READ_CLEARTEXT}" ]]; then
+    if [[ -f "${PLIST}" ]] && grep -q -- "--read-cleartext" "${PLIST}"; then
+        READ_CLEARTEXT=1
+        echo "Keeping payload reading on, as the installed job had it."
+    else
+        READ_CLEARTEXT=0
+    fi
+fi
+
+EXTRA_ARGS_XML=""
+if [[ "${READ_CLEARTEXT}" -eq 1 ]]; then
+    EXTRA_ARGS_XML=$'\n        <string>--read-cleartext</string>'
+fi
+
 if [[ "${EUID}" -ne 0 ]]; then
     echo "This installs a system daemon and needs root:" >&2
     echo "  sudo $0" >&2
@@ -75,7 +124,7 @@ cat > "${PLIST}" <<PLIST_END
         <string>${INSTALLED_BINARY}</string>
         <string>--serve</string>
         <string>--loopback</string>
-        <string>--no-log</string>
+        <string>--no-log</string>${EXTRA_ARGS_XML}
         <string>--history-db</string>
         <string>${DATA_DIR}/history.sqlite</string>
     </array>
@@ -154,6 +203,18 @@ if launchctl print "system/${LABEL}" > /dev/null 2>&1; then
     echo
     echo "Beholder is now capturing continuously and will start at boot."
     echo
+    # --read-cleartext announces itself, the way --probe does. It is the one option here
+    # that changes what the daemon holds from facts about traffic to some of the traffic,
+    # and an installed daemon carries it silently across reboots — so the moment it is
+    # turned on is the only moment there is to say so.
+    if [[ "${READ_CLEARTEXT}" -eq 1 ]]; then
+        echo "  Reading cleartext: ON. The opening 4 KB of each unencrypted connection"
+        echo "  is kept in memory, including any cookies, tokens and API keys it"
+        echo "  contains, and is shown to whoever is at the keyboard. Nothing is written"
+        echo "  to the history database or the transcript. To turn it back off:"
+        echo "    sudo ${ROOT}/Scripts/install-daemon.sh --no-read-cleartext"
+        echo
+    fi
     echo "  History:   ${DATA_DIR}/history.sqlite"
     echo "  Output:    /var/log/beholderd.log"
     echo "  Errors:    /var/log/beholderd.err"

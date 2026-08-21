@@ -18,6 +18,10 @@ struct Options {
     var historyPath: String?
     var storeHistory = true
     var readCleartext = false
+    var measureQuality = true
+    var probe = false
+    var probeTargets: [String] = []
+    var probeInterval = 30.0
 
     /// Whether payload reading will actually happen.
     ///
@@ -26,6 +30,20 @@ struct Options {
     /// snaplen, and the banner — cannot disagree about it, which would otherwise show up
     /// as a raised snaplen on a run that keeps nothing.
     var readsCleartext: Bool { readCleartext && (top || serve) }
+
+    /// Whether quality will actually be measured.
+    ///
+    /// Like `readsCleartext`, measurement needs flows to attach itself to, so a run that
+    /// only counts packets does none of it whatever the flag says. Derived in one place so
+    /// the monitor and the banner cannot disagree.
+    var measuresQuality: Bool { measureQuality && (top || serve) }
+
+    /// Whether probes will actually be sent.
+    ///
+    /// Probing writes to the history database and nowhere else, so a run that is not
+    /// storing history has nowhere to put the answers. Derived here so the banner and the
+    /// prober cannot disagree about whether this machine is sending.
+    var probes: Bool { probe && storeHistory && (top || serve) }
 
     static let usage = """
         usage: beholderd [--top] [--loopback] [--log DIR | --no-log]
@@ -52,6 +70,25 @@ struct Options {
                         the user who ran sudo and created mode 0600.
           --socket PATH Publish somewhere other than \(WireProtocol.defaultSocketPath).
           --no-history  Do not record finished connections to the history database.
+          --probe       Also *send* a small ICMP echo to the default gateway and to a few
+                        fixed addresses every 30 seconds. Off by default, and the one thing
+                        here that is not purely passive: everything else watches traffic
+                        somebody else asked for. It exists because two questions cannot be
+                        answered any other way — whether the connection was working while
+                        nobody was using it, and whether a problem is your own Wi-Fi or the
+                        link beyond your router. Timing the first hop separately is the only
+                        way to tell those apart.
+          --probe-target ADDR
+                        Probe this address instead of the built-in anchors. Repeatable.
+          --probe-interval SECONDS
+                        How often to probe (default 30).
+          --no-quality  Do not measure round-trip time, retransmissions or jitter.
+                        Measurement is on by default — unlike --read-cleartext it reads
+                        only header fields the kernel has already handed over, and learns
+                        nothing about what any connection carries. On by default for a
+                        second reason too: it has to be running when the trouble happens,
+                        and a switch flipped afterwards has nothing to say about a
+                        connection that has already gone bad.
           --read-cleartext
                         Also keep the opening few kilobytes of connections that are not
                         encrypted, so Beholder.app can show what is actually being sent.
@@ -83,8 +120,26 @@ struct Options {
         var expectingHours = false
         var expectingMatch = false
         var expectingHistoryPath = false
+        var expectingProbeTarget = false
+        var expectingProbeInterval = false
 
         for argument in arguments {
+            if expectingProbeTarget {
+                options.probeTargets.append(argument)
+                expectingProbeTarget = false
+                continue
+            }
+            if expectingProbeInterval {
+                guard let seconds = Double(argument), seconds >= 5 else {
+                    FileHandle.standardError.write(
+                        Data("beholderd: --probe-interval needs at least 5 seconds\n".utf8)
+                    )
+                    return nil
+                }
+                options.probeInterval = seconds
+                expectingProbeInterval = false
+                continue
+            }
             if expectingLogDirectory {
                 options.logDirectory = argument
                 expectingLogDirectory = false
@@ -137,6 +192,14 @@ struct Options {
                 options.storeHistory = false
             case "--read-cleartext":
                 options.readCleartext = true
+            case "--no-quality":
+                options.measureQuality = false
+            case "--probe":
+                options.probe = true
+            case "--probe-target":
+                expectingProbeTarget = true
+            case "--probe-interval":
+                expectingProbeInterval = true
             case "--no-log":
                 options.logging = false
             case "--loopback", "-l":
@@ -178,6 +241,18 @@ struct Options {
         }
         guard !expectingHistoryPath else {
             FileHandle.standardError.write(Data("beholderd: --history-db needs a path\n".utf8))
+            return nil
+        }
+        guard !expectingProbeTarget else {
+            FileHandle.standardError.write(
+                Data("beholderd: --probe-target needs an address\n".utf8)
+            )
+            return nil
+        }
+        guard !expectingProbeInterval else {
+            FileHandle.standardError.write(
+                Data("beholderd: --probe-interval needs a number of seconds\n".utf8)
+            )
             return nil
         }
         return options

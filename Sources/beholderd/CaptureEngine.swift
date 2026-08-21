@@ -2,6 +2,7 @@ import BeholderCore
 import CBeholderShim
 import Darwin
 import Dispatch
+import Foundation
 
 // MARK: - Errors
 
@@ -263,8 +264,19 @@ final class InterfaceCapture: @unchecked Sendable {
         counters.packets += 1
         counters.wireBytes += UInt64(header.len)
 
+        // BPF's own timestamp, not `Date()`. The packet is about to cross onto another
+        // queue, and by the time anything measures an interval from it the delay is the
+        // flow queue's backlog rather than the network's — which is the difference between
+        // a round-trip time and a load average.
+        let timestamp = Date(
+            timeIntervalSince1970: Double(header.ts.tv_sec)
+                + Double(header.ts.tv_usec) / 1_000_000
+        )
+
         let buffer = UnsafeRawBufferPointer(start: bytes, count: Int(header.caplen))
-        switch PacketParser.parse(buffer, linkLayer: linkLayer, wireBytes: header.len) {
+        switch PacketParser.parse(
+            buffer, linkLayer: linkLayer, wireBytes: header.len, timestamp: timestamp
+        ) {
         case .success(let packet):
             counters.parsed += 1
             // The payload slice is handed straight through and is valid only until this
