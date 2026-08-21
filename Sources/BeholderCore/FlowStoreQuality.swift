@@ -242,13 +242,17 @@ extension FlowStore {
             }
             try execute("COMMIT;")
         } catch {
-            try? execute("ROLLBACK;")
+            _ = try? execute("ROLLBACK;")
             throw error
         }
         return rows.count
     }
 
     /// Folds minutes older than the retention window into hours, then deletes them.
+    ///
+    /// Returns the total rows deleted across all three quality tables — minutes, hours
+    /// and probes — since all three are pruned here and a count covering only one of them
+    /// would understate the work without saying so.
     ///
     /// Percentiles are deliberately not carried up. They came from a distribution that no
     /// longer exists, and a weighted average of two percentiles is not a percentile of
@@ -301,15 +305,20 @@ extension FlowStore {
                     connection_timeouts = connection_timeouts + excluded.connection_timeouts;
                 """
             )
-            try execute("DELETE FROM quality_minutes WHERE minute < \(minuteCutoff);")
-            try execute("DELETE FROM quality_hours WHERE hour < \(hourCutoff);")
-            try execute("DELETE FROM quality_probes WHERE at < \(probeCutoff);")
+            // Each count comes from the statement that caused it. Read once at the end
+            // instead, the total was whatever the last DELETE did — `sqlite3_changes`
+            // reports the most recent row-changing statement, and `COMMIT` is not one, so
+            // a fold that cleared thousands of minutes reported only the probes.
+            var removed = 0
+            removed += try execute("DELETE FROM quality_minutes WHERE minute < \(minuteCutoff);")
+            removed += try execute("DELETE FROM quality_hours WHERE hour < \(hourCutoff);")
+            removed += try execute("DELETE FROM quality_probes WHERE at < \(probeCutoff);")
             try execute("COMMIT;")
+            return removed
         } catch {
-            try? execute("ROLLBACK;")
+            _ = try? execute("ROLLBACK;")
             throw error
         }
-        return Int(sqlite3_changes(rawHandle))
     }
 
 }

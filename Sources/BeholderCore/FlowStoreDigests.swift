@@ -476,14 +476,10 @@ extension FlowStore {
 
     // MARK: - Counting
 
+    /// The public way to ask, and the reason `count(of:)` is not itself public: a caller
+    /// outside Core gets the question it actually has, with no table name to supply.
     public func flowRowCount() throws -> Int {
-        var count = 0
-        try withStatement("SELECT COUNT(*) FROM flows;") { statement in
-            if sqlite3_step(statement) == SQLITE_ROW {
-                count = Int(sqlite3_column_int64(statement, 0))
-            }
-        }
-        return count
+        try count(of: .flows)
     }
 
     // MARK: - Shared plumbing
