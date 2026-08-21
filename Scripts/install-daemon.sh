@@ -31,23 +31,30 @@ INSTALLED_BINARY="/usr/local/libexec/beholderd"
 # first one straight back after a kill. So "start it with --read-cleartext" is not an
 # instruction anyone can follow while this is installed — reinstalling with the flag is.
 READ_CLEARTEXT=""
+BLOCK=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --read-cleartext) READ_CLEARTEXT=1 ;;
         --no-read-cleartext) READ_CLEARTEXT=0 ;;
+        --block) BLOCK=1 ;;
+        --no-block) BLOCK=0 ;;
         -h | --help)
-            echo "usage: $0 [--read-cleartext | --no-read-cleartext]"
+            echo "usage: $0 [--read-cleartext | --no-read-cleartext] [--block | --no-block]"
             echo
             echo "  --read-cleartext  keep the opening 4 KB of each unencrypted"
             echo "                    connection in memory, so the app's Cleartext view"
             echo "                    can show what they carry. Off unless asked for."
+            echo
+            echo "  --block           enforce the block list, and open the control socket"
+            echo "                    so the app can change it. Off unless asked for."
+            echo "                    Needs install-pf-anchor.sh to have been run."
             echo
             echo "  Given neither, an existing installation keeps whatever it had."
             exit 0
             ;;
         *)
             echo "Unknown option: $1" >&2
-            echo "usage: $0 [--read-cleartext | --no-read-cleartext]" >&2
+            echo "usage: $0 [--read-cleartext | --no-read-cleartext] [--block | --no-block]" >&2
             exit 2
             ;;
     esac
@@ -69,9 +76,25 @@ if [[ -z "${READ_CLEARTEXT}" ]]; then
     fi
 fi
 
+# Same reasoning for --block: the installed job is the only daemon that can serve, so
+# "start it with --block" is not an instruction anyone can follow while this is installed.
+# And the same rule about silence — an update that quietly stopped enforcing a firewall
+# would be worse than one that quietly stopped reading payload.
+if [[ -z "${BLOCK}" ]]; then
+    if [[ -f "${PLIST}" ]] && grep -q -- "--block" "${PLIST}"; then
+        BLOCK=1
+        echo "Keeping blocking on, as the installed job had it."
+    else
+        BLOCK=0
+    fi
+fi
+
 EXTRA_ARGS_XML=""
 if [[ "${READ_CLEARTEXT}" -eq 1 ]]; then
     EXTRA_ARGS_XML=$'\n        <string>--read-cleartext</string>'
+fi
+if [[ "${BLOCK}" -eq 1 ]]; then
+    EXTRA_ARGS_XML+=$'\n        <string>--block</string>'
 fi
 
 if [[ "${EUID}" -ne 0 ]]; then
@@ -207,6 +230,16 @@ if launchctl print "system/${LABEL}" > /dev/null 2>&1; then
     # that changes what the daemon holds from facts about traffic to some of the traffic,
     # and an installed daemon carries it silently across reboots — so the moment it is
     # turned on is the only moment there is to say so.
+    if [[ "${BLOCK}" -eq 1 ]]; then
+        echo "  Blocking: ON. This machine will refuse to reach the destinations named in"
+        echo "  /usr/local/etc/beholder/blocklist.conf, for every program on it, and will"
+        echo "  do so again after every reboot. If the daemon cannot enforce the list it"
+        echo "  refuses to start, so check it after installing:"
+        echo "    make status"
+        echo "  To turn it back off:"
+        echo "    sudo ${ROOT}/Scripts/install-daemon.sh --no-block"
+        echo
+    fi
     if [[ "${READ_CLEARTEXT}" -eq 1 ]]; then
         echo "  Reading cleartext: ON. The opening 4 KB of each unencrypted connection"
         echo "  is kept in memory, including any cookies, tokens and API keys it"

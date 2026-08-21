@@ -56,6 +56,14 @@ test: ## Run the test suite
 test-socket: ## Check the publishing socket keeps its framing and survives readers leaving
 	./Scripts/test-publishing-socket.sh
 
+.PHONY: test-pf
+test-pf: ## Check blocking is off by default and prints a clean ruleset
+	./Scripts/test-pf-anchor.sh
+
+.PHONY: test-control
+test-control: ## Check the control socket admits only the pinned program
+	./Scripts/test-control-socket.sh
+
 .PHONY: check
 check: ## Build and test, failing on any warning
 	@swift build --configuration $(CONFIG) 2>&1 | tee /tmp/beholder-build.log
@@ -65,6 +73,8 @@ check: ## Build and test, failing on any warning
 	@swift test
 	@./Scripts/test-publishing-socket.sh
 	@./Scripts/test-mcp-stdio.sh
+	@./Scripts/test-pf-anchor.sh
+	@./Scripts/test-control-socket.sh
 
 # ------------------------------------------------------------------------- running
 
@@ -91,6 +101,60 @@ stats: daemon-bin ## (root) Per-interface capture statistics
 .PHONY: open-app
 open-app: app ## Open the app against an already-running daemon
 	open $(APP)
+
+# ------------------------------------------------------------------------- blocking
+
+# The one thing Beholder does that changes what this machine can reach. Separate from
+# everything above, and from `make install`, because capturing and blocking are different
+# decisions - installing the daemon should not quietly arm a firewall.
+
+.PHONY: pf-install
+pf-install: daemon-bin ## (root) Install the pf anchor, so --block has something to fill
+	sudo ./Scripts/install-pf-anchor.sh
+
+.PHONY: pf-uninstall
+pf-uninstall: ## (root) Remove the pf anchor. Your block list is left alone
+	sudo ./Scripts/uninstall-pf-anchor.sh
+
+.PHONY: control-pin
+control-pin: app ## (root) Pin the app's identity, so it may change what is blocked
+	sudo ./Scripts/install-control-pin.sh
+
+.PHONY: control-status
+control-status: daemon-bin ## Report whether the pinned peer identity can be loaded
+	@$(DAEMON) --check-control-pin
+
+.PHONY: block
+block: daemon-bin ## (root) Capture, publish, and block what the block list names
+	sudo $(DAEMON) --serve --loopback --block
+
+.PHONY: install-blocking
+install-blocking: ## (root) Make the installed daemon enforce the block list, across reboots
+	sudo ./Scripts/install-daemon.sh --block
+
+.PHONY: uninstall-blocking
+uninstall-blocking: ## (root) Stop the installed daemon enforcing anything
+	sudo ./Scripts/install-daemon.sh --no-block
+
+.PHONY: check-blocklist
+check-blocklist: daemon-bin ## Show what the block list would block, changing nothing
+	@$(DAEMON) --check-blocklist
+
+# /sbin/pfctl absolutely, never `pfctl` off PATH. These run under sudo, and resolving a
+# program name through PATH in a root shell is the thing the daemon's own spawner is
+# careful to avoid; the Makefile should not be the loose end.
+.PHONY: block-status
+block-status: ## Show what pf is blocking for Beholder right now
+	@echo "Rules:"
+	@sudo /sbin/pfctl -a com.beholder -s rules 2>/dev/null | sed 's/^/  /' || echo "  anchor not loaded"
+	@echo "Blocking:"
+	@sudo /sbin/pfctl -a com.beholder -t beholder_blocked -T show 2>/dev/null | sed 's/^/  /' || echo "  nothing"
+
+.PHONY: unblock
+unblock: ## (root) Stop blocking everything, now. The escape hatch
+	@sudo /sbin/pfctl -a com.beholder -t beholder_blocked -T flush 2>/dev/null \
+		&& echo "Block table emptied." \
+		|| echo "Nothing to empty - the anchor is not loaded."
 
 # --------------------------------------------------------------- no root required
 

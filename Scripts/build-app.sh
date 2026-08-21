@@ -67,9 +67,23 @@ echo "</plist>" >> "${APP}/Contents/Info.plist"
 
 plutil -lint "${APP}/Contents/Info.plist" > /dev/null
 
-# Ad-hoc signature. Enough for local execution since the app claims no entitlements;
-# replace with a Developer ID when one exists.
-codesign --force --sign - "${APP}" 2>/dev/null || echo "note: ad-hoc signing skipped"
+# Ad-hoc signature, with the hardened runtime.
+#
+# The signature is what lets the daemon tell this app from anything else running as you: an
+# ad-hoc signature has a stable cdhash, install-control-pin.sh records it, and the control
+# socket admits nobody else. No Developer ID is involved in any of that - replace the "-"
+# with one when it exists and nothing else here changes.
+#
+# --options runtime is what makes the pin worth having. Without the hardened runtime, another
+# process running as your account can inject code into this one and then speak on the control
+# socket as it; library validation comes with the runtime and closes that. It costs nothing
+# here because the app loads only system frameworks.
+#
+# Note the consequence: the cdhash changes whenever the binary does, so a rebuilt app is a
+# different program until it is pinned again. That is the point of an identity rather than a
+# name, and `make reload` re-pins as part of the rebuild.
+codesign --force --options runtime --sign - "${APP}" 2>/dev/null \
+    || echo "note: ad-hoc signing skipped"
 
 echo
 echo "Built ${APP}"

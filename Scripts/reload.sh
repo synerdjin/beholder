@@ -169,6 +169,24 @@ fi
 BEHOLDER_SKIP_BUILD=1 "${ROOT}/Scripts/build-app.sh" "${CONFIGURATION}" > /dev/null
 echo "Assembled ${APP}"
 
+# Re-pin the app's code identity, because rebuilding changed it.
+#
+# The control socket admits the app on its cdhash, and a rebuilt binary has a different one
+# by design - an identity that survived the code changing would not be one. Without this, the
+# first thing a developer would see after every edit is the app unable to change blocking,
+# with a refusal naming a hash they have no reason to connect to the rebuild they just did.
+#
+# Only when a pin already exists. This installs nothing new, exactly like the rest of reload.
+CONTROL_PIN="/usr/local/etc/beholder/control-peer.requirement"
+if [[ -f "${CONTROL_PIN}" ]]; then
+    if sudo "${ROOT}/Scripts/install-control-pin.sh" "${APP}" > /dev/null 2>&1; then
+        echo "Re-pinned the app's control identity"
+    else
+        echo "WARNING: could not re-pin the app; it will not be able to change blocking." >&2
+        echo "         Fix with: sudo ./Scripts/install-control-pin.sh" >&2
+    fi
+fi
+
 # ----------------------------------------------------------------------------- daemon
 
 DAEMON_RESULT="left alone (none installed)"
