@@ -22,6 +22,17 @@ struct Options {
     var probe = false
     var probeTargets: [String] = []
     var probeInterval = 30.0
+    var block = false
+    var blocklistPath = BlockList.defaultPath
+    var checkBlocklist = false
+    var printPFAnchor = false
+    var printPFConfiguration = false
+    var managedBlocklistPath = ControlProtocol.managedListPath
+    var control = false
+    var checkControlPin = false
+    var checkControlPinBundle: String?
+    var controlSocketPath = ControlProtocol.defaultSocketPath
+    var controlPinPath = ControlProtocol.pinPath
 
     /// Whether payload reading will actually happen.
     ///
@@ -44,6 +55,22 @@ struct Options {
     /// storing history has nowhere to put the answers. Derived here so the banner and the
     /// prober cannot disagree about whether this machine is sending.
     var probes: Bool { probe && storeHistory && (top || serve) }
+
+    /// Whether the control socket should be opened.
+    ///
+    /// `--block` implies it: blocking that cannot be adjusted from the app is a firewall you
+    /// have to edit a file and send a signal to change, which is the Phase A experience and
+    /// not the one worth keeping. `--control` alone is also allowed, so the app can ask about
+    /// blocking and be told it is not running rather than finding a socket missing and having
+    /// to guess why.
+    var opensControlSocket: Bool { control || block }
+
+    /// Blocking, unlike everything else here, does not need flows.
+    ///
+    /// There is deliberately no `blocks` derived property gating this on `--serve` or
+    /// `--top`: pf enforces in the kernel whether or not anything is watching, and a run
+    /// that only counts packets still blocks exactly what it was asked to. Pretending
+    /// otherwise would mean a flag that silently does nothing in one of the modes.
 
     static let usage = """
         usage: beholderd [--top] [--loopback] [--log DIR | --no-log]
@@ -98,6 +125,48 @@ struct Options {
                         and released when a connection ends — never written to the history
                         database or the run transcript, and never sent over MCP. Raises
                         the capture snaplen, which costs a little more copying per packet.
+          --block       Block the destinations listed in the block list, instead of only
+                        reporting them. Off by default, and the only thing Beholder does
+                        that changes what this machine can reach — everything else here
+                        observes. Needs root and a one-time `sudo ./Scripts/install-pf-anchor.sh`.
+                        Blocking is by *destination*, never by process: pf matches
+                        addresses, so a block applies to every program on the machine, and
+                        an address serving several names takes all of them with it.
+                        Blocking lasts as long as the daemon does — stopping it restores
+                        everything. If it is killed outright, `make unblock` clears up.
+          --blocklist PATH
+                        Read the block list somewhere other than
+                        \(BlockList.defaultPath). It must be owned by root and writable by
+                        nobody else, because it decides what a root process adds to the
+                        firewall.
+          --check-blocklist
+                        Parse the block list, print what it would block, and exit. Needs no
+                        root and changes nothing. Exits non-zero if any line cannot be used.
+          --control     Open the control socket so Beholder.app can change what is blocked.
+                        Implied by --block. The socket is the only channel into the daemon
+                        that changes anything: the publishing socket still accepts no
+                        command at all. It admits a connection only from a program whose
+                        code identity matches the one pinned by install-control-pin.sh —
+                        file permissions cannot tell your app from anything else running as
+                        you, and for a writer that distinction is the whole point.
+          --control-socket PATH
+          --control-pin PATH
+                        Where the control socket lives, and where the peer's expected code
+                        identity is pinned. Defaults: \(ControlProtocol.defaultSocketPath),
+                        \(ControlProtocol.pinPath).
+          --check-control-pin [APP]
+                        Report whether the pinned peer identity can be loaded, and — given an
+                        app bundle — whether that bundle satisfies it. Needs no root and opens
+                        nothing. Rebuilding the app changes its identity, so this is the way
+                        to tell a stale pin from a working one.
+          --managed-blocklist PATH
+                        Where to keep what the app blocks. Never the same file as
+                        --blocklist: that one is written by a person and is not rewritten.
+          --print-pf-anchor
+          --print-pf-conf
+                        Print the pf rules Beholder blocks with, and the lines /etc/pf.conf
+                        needs for them to be evaluated. install-pf-anchor.sh writes what
+                        these print rather than keeping a second copy that could drift.
 
         Querying history (needs no root if the database is yours):
 
@@ -115,15 +184,25 @@ struct Options {
 
     static func parse(_ arguments: [String]) -> Options? {
         var options = Options()
-        var expectingLogDirectory = false
-        var expectingSocketPath = false
+        /// The flag whose value is expected next, and where to put it.
+        ///
+        /// One slot rather than a boolean per flag: they all do the same thing, and the
+        /// failure mode of the old shape — adding the flag and forgetting its trailing
+        /// "needs a value" guard — silently swallowed the argument instead of complaining.
+        ///
+        /// A closure rather than a key path because three of these fields are `String?` and
+        /// the rest are `String`, and one slot has to be able to hold either.
+        var pending: (flag: String, assign: (inout Options, String) -> Void)?
         var expectingHours = false
-        var expectingMatch = false
-        var expectingHistoryPath = false
         var expectingProbeTarget = false
         var expectingProbeInterval = false
 
         for argument in arguments {
+            if let slot = pending {
+                slot.assign(&options, argument)
+                pending = nil
+                continue
+            }
             if expectingProbeTarget {
                 options.probeTargets.append(argument)
                 expectingProbeTarget = false
@@ -140,16 +219,6 @@ struct Options {
                 expectingProbeInterval = false
                 continue
             }
-            if expectingLogDirectory {
-                options.logDirectory = argument
-                expectingLogDirectory = false
-                continue
-            }
-            if expectingSocketPath {
-                options.socketPath = argument
-                expectingSocketPath = false
-                continue
-            }
             if expectingHours {
                 guard let hours = Int(argument), hours > 0 else {
                     FileHandle.standardError.write(
@@ -161,27 +230,17 @@ struct Options {
                 expectingHours = false
                 continue
             }
-            if expectingMatch {
-                options.historyMatch = argument
-                expectingMatch = false
-                continue
-            }
-            if expectingHistoryPath {
-                options.historyPath = argument
-                expectingHistoryPath = false
-                continue
-            }
             switch argument {
             case "--log":
-                expectingLogDirectory = true
+                pending = ("--log", { $0.logDirectory = $1 })
             case "--socket":
-                expectingSocketPath = true
+                pending = ("--socket", { $0.socketPath = $1 })
             case "--hours":
                 expectingHours = true
             case "--match":
-                expectingMatch = true
+                pending = ("--match", { $0.historyMatch = $1 })
             case "--history-db":
-                expectingHistoryPath = true
+                pending = ("--history-db", { $0.historyPath = $1 })
             case "--serve":
                 options.serve = true
             case "--history":
@@ -200,6 +259,26 @@ struct Options {
                 expectingProbeTarget = true
             case "--probe-interval":
                 expectingProbeInterval = true
+            case "--block":
+                options.block = true
+            case "--blocklist":
+                pending = ("--blocklist", { $0.blocklistPath = $1 })
+            case "--managed-blocklist":
+                pending = ("--managed-blocklist", { $0.managedBlocklistPath = $1 })
+            case "--control":
+                options.control = true
+            case "--check-control-pin":
+                options.checkControlPin = true
+            case "--control-socket":
+                pending = ("--control-socket", { $0.controlSocketPath = $1 })
+            case "--control-pin":
+                pending = ("--control-pin", { $0.controlPinPath = $1 })
+            case "--check-blocklist":
+                options.checkBlocklist = true
+            case "--print-pf-anchor":
+                options.printPFAnchor = true
+            case "--print-pf-conf":
+                options.printPFConfiguration = true
             case "--no-log":
                 options.logging = false
             case "--loopback", "-l":
@@ -223,24 +302,13 @@ struct Options {
             }
         }
 
-        guard !expectingLogDirectory else {
-            FileHandle.standardError.write(Data("beholderd: --log needs a directory\n".utf8))
-            return nil
-        }
-        guard !expectingSocketPath else {
-            FileHandle.standardError.write(Data("beholderd: --socket needs a path\n".utf8))
+        guard pending == nil else {
+            let message = "beholderd: \(pending!.flag) needs a value\n"
+            FileHandle.standardError.write(Data(message.utf8))
             return nil
         }
         guard !expectingHours else {
             FileHandle.standardError.write(Data("beholderd: --hours needs a number\n".utf8))
-            return nil
-        }
-        guard !expectingMatch else {
-            FileHandle.standardError.write(Data("beholderd: --match needs a search term\n".utf8))
-            return nil
-        }
-        guard !expectingHistoryPath else {
-            FileHandle.standardError.write(Data("beholderd: --history-db needs a path\n".utf8))
             return nil
         }
         guard !expectingProbeTarget else {
@@ -253,6 +321,16 @@ struct Options {
             FileHandle.standardError.write(
                 Data("beholderd: --probe-interval needs a number of seconds\n".utf8)
             )
+            return nil
+        }
+        guard options.managedBlocklistPath != options.blocklistPath else {
+            // They are merged, and one of them is rewritten by the daemon. Pointing both at
+            // one file would have the daemon regenerate the hand-edited list, comments and
+            // all, the first time anything was blocked from the app.
+            let message =
+                "beholderd: --managed-blocklist must differ from --blocklist; the managed "
+                + "one is rewritten and the other is not\n"
+            FileHandle.standardError.write(Data(message.utf8))
             return nil
         }
         return options

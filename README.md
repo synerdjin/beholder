@@ -3,11 +3,13 @@
 A network traffic visualizer for macOS — see which process on your laptop is talking to
 whom, where in the world that is, and how much data is moving.
 
-Inspired by Little Snitch's Network Monitor. **Beholder observes; it does not block.** It
-also measures how well the network is working — latency, retransmissions, jitter — and can
-tell you whether a bad stretch was your connection's fault or the far end's. It watches
-rather than sends, with exactly one opt-in exception described under
-[Measuring the connection](#measuring-the-connection).
+Inspired by Little Snitch's Network Monitor. **Beholder observes by default**, and it also
+measures how well the network is working — latency, retransmissions, jitter — and can tell
+you whether a bad stretch was your connection's fault or the far end's.
+
+Two things it can do beyond watching, both off unless asked for and both announced when
+they are on: it can [send](#--probe-the-one-thing-that-sends) a small probe, and it can
+[block](#blocking) destinations you name. Everything else here reads and reports.
 
 ```bash
 git clone https://github.com/synerdjin/beholder.git && cd beholder
@@ -15,12 +17,12 @@ make run          # builds both halves, asks for your password once, opens the a
 ```
 
 Requires macOS 14+ and Xcode's Swift toolchain. Nothing else — no Apple Developer account,
-no third-party packages. `make help` lists every target; `make check` builds, runs the 209
+no third-party packages. `make help` lists every target; `make check` builds, runs the 389
 tests and exercises the daemon's socket without needing root.
 
-For the full setup — the optional databases, continuous capture, the MCP server — there is
-a wizard that asks about each piece in the order the answers depend on each other, and does
-nothing it did not ask about first:
+For the optional databases, continuous capture and the MCP server there is a wizard that
+asks about each in the order the answers depend on each other, and does nothing it did not
+ask about first. [Blocking](#blocking) is installed separately, on purpose:
 
 ```bash
 make wizard       # install or update, one decision at a time
@@ -46,8 +48,15 @@ Beholder instead takes the packet-capture route:
 - **libproc**'s socket table, polled, to attribute each connection to a process.
 
 Both are public API and need no entitlement — only root, because `/dev/bpf*` is
-`root:wheel` mode 0600. The trade-off is that Beholder cannot intercept or block
-connections, and attribution of very short-lived connections is best-effort.
+`root:wheel` mode 0600. The trade-off is that Beholder cannot *intercept* a connection —
+it sees packets, it does not sit in the path — and attribution of very short-lived
+connections is best-effort.
+
+Blocking is a separate question from interception, and the answer is different. Beholder
+can block, using **pf**, the packet filter macOS inherits from OpenBSD: it is in the kernel
+already, `pfctl` configures it, and root is the only requirement. What pf cannot do is
+match on a process, so Beholder blocks by destination. See [Blocking](#blocking), which is
+where that distinction is spelled out rather than left to be discovered.
 
 ## Architecture
 
@@ -60,15 +69,19 @@ beholderd (root, launchd)                    Beholder.app (user, SwiftUI)
   FlowStore       SQLite
 ```
 
-The daemon holds all privilege and all state; the app is a pure view that can be closed or
-crash without interrupting capture.
+The daemon holds all privilege and all state; the app can be closed or crash without
+interrupting capture. It reads snapshots, and — with blocking installed — is the one program
+allowed to ask the daemon to change what is blocked.
 
 The link between them is a Unix domain socket carrying newline-delimited JSON, one
 snapshot per second, mode 0600 and owned by the user who started it. Not XPC: that wants a
 `MachServices` entry and, to validate the peer on the other end, a signing identity this
-project does not have. The daemon is therefore strictly read-only over the socket — it
-exposes no command that changes state, so an unauthenticated reader can learn only what
-`lsof` would already tell it, whereas an unauthenticated *writer* would be a real hole.
+project does not have.
+
+**That socket is strictly read-only** — it exposes no command at all, so an unauthenticated
+reader learns only what `lsof` would already tell it, whereas an unauthenticated *writer*
+would be a real hole. Blocking, which does change state, travels over a second socket that
+authenticates its peer; see [Blocking](#blocking).
 
 ## Following the VPN
 
@@ -236,19 +249,20 @@ sudo ./.build/debug/beholderd --serve --loopback   # capture, needs root
 `--serve` draws nothing so it can sit in the background; add `--top` to watch it in the
 terminal at the same time.
 
-The plan called for XPC. XPC to a root daemon means registering it under
-`/Library/LaunchDaemons` — a persistent system change, and realistically one wanting a
-signing identity to be pleasant. A Unix socket carrying newline-delimited JSON needs
-neither, so the app works today and the daemon stays something started and stopped by
-hand. The socket is 0600 and owned by the user who ran `sudo`, for the same reason the
-transcript is.
-
-The daemon publishes and never accepts commands. While there is no signing identity to
-validate a peer with, an unauthenticated *reader* can only see what `lsof` would already
-show it; an unauthenticated writer would be a real hole.
-
 There is no Xcode project. A macOS app bundle is a directory with an `Info.plist` in it,
 and `Scripts/build-app.sh` arranges one around the SwiftPM binary.
+
+**Phase 3c — geolocation and ownership. Done.**
+
+- [x] Hand-written `.mmdb` reader, world map, autonomous-system and tracker lookup
+
+See [Geolocation](#geolocation) and [Who is on the other end](#who-is-on-the-other-end).
+
+**Phase 4 — history. Done.**
+
+- [x] SQLite store with versioned migrations, read-only for every viewer
+
+See [History](#history).
 
 **Phase 5 — what is unprotected. Done.**
 
@@ -261,10 +275,23 @@ and `Scripts/build-app.sh` arranges one around the SwiftPM binary.
 See [Reading unprotected traffic](#reading-unprotected-traffic), which is where the
 trade-off this makes is written down rather than left to be discovered.
 
+**Phase 6 — blocking. Done, from the file and from the app.**
+
+- [x] pf anchor with a static ruleset and a dynamic table
+- [x] `--block`, off by default and announced, refusing rather than half-working
+- [x] Block list owned by root, reloaded on `SIGHUP`, refused whole if any line is unusable
+- [x] Blocking released on every exit path; `make unblock` for the one that runs no cleanup
+- [x] `make doctor` reports an anchor a system update has silently unloaded
+- [x] Control socket admitting only a pinned code identity — no Developer ID required
+- [x] Blocking tab, and a block action on any connection
+
+See [Blocking](#blocking). The *publishing* socket is still strictly read-only; commands
+travel over a second socket that authenticates its peer.
+
 **Later**
 
-- [ ] GeoIP and the world map — rest of Phase 3
-- [ ] SQLite history — Phase 4
+- [ ] Blocking by host name, which needs addresses learned from observed DNS answers rather
+      than resolved once when a list is read.
 
 ## Building and running
 
@@ -457,8 +484,11 @@ suspicious host has defeated its own purpose.
   that happens, segment and retransmission counts are undercounts; Beholder detects it and
   says so rather than reporting the low numbers as fact.
 - Hostnames are unavailable for connections using TLS Encrypted Client Hello.
-- Per-process **blocking** is out of scope; it cannot be built without the Apple
-  entitlement described above.
+- **Blocking is by destination, never by process, and host names cannot be blocked.** pf
+  matches addresses and has no concept of a process, so a block applies to every program on
+  the machine — and one address commonly serves many names. Spelled out under
+  [Blocking](#it-blocks-destinations-not-processes), because it shapes what the feature can
+  usefully be asked to do.
 - Byte counts are wire bytes on the captured interface. Capturing the tunnel excludes VPN
   encapsulation overhead, so totals will differ slightly from what `en0` sees.
 - A transparent proxy — NordVPN's Threat Protection is one — re-originates connections
@@ -704,9 +734,9 @@ from everything beyond it — a clean gateway with slow anchors puts the trouble
 your router; a slow gateway puts it on your own cable or radio.
 
 It is **off by default**, and when it is on the daemon says so on startup, naming its targets
-and interval. Beholder still does not block, alter, or interfere with anyone else's traffic —
-but with this flag it is no longer true that it only listens, and that distinction is worth
-stating rather than leaving to be discovered.
+and interval. It alters nobody else's traffic — that is `--block`'s department, and equally
+opt-in — but with this flag it is no longer true that Beholder only listens, and that
+distinction is worth stating rather than leaving to be discovered.
 
 Probes are excluded from Beholder's own measurements by process, not by a capture filter: a
 filter on those addresses would also hide the genuine DNS this machine sends to them all day.
@@ -715,6 +745,243 @@ filter on those addresses would also hide the genuine DNS this machine sends to 
 sudo ./.build/debug/beholderd --serve --probe     # gateway plus the built-in anchors
 sudo ./.build/debug/beholderd --serve --probe --probe-target 192.0.2.1 --probe-interval 60
 ```
+
+## Blocking
+
+Everything above reports. This stops traffic leaving, and it is the only thing here that
+changes what the machine can reach, so it is off unless asked for and says so when it is on.
+
+```bash
+sudo ./Scripts/install-pf-anchor.sh    # once, and it says exactly what it changes
+sudo ./Scripts/install-control-pin.sh  # once, so the app may change what is blocked
+make block                             # capture, publish and enforce
+```
+
+**With the daemon installed, use `make install-blocking` instead.** The launchd job is the
+only daemon that can serve — a second one finds the socket answering and refuses rather than
+stealing it — so "start it with `--block`" is not an instruction anyone can follow while it
+is installed. Reinstalling with the flag is, and it survives reboots. `make uninstall-blocking`
+takes it back off.
+
+Then use the app's **Blocking** tab, or edit the list by hand:
+
+```bash
+sudo $EDITOR /usr/local/etc/beholder/blocklist.conf
+make check-blocklist                   # what that would block, changing nothing
+sudo kill -HUP $(pgrep -x beholderd)
+```
+
+### It blocks destinations, not processes
+
+This is the first thing to understand about it and the hardest to design around, so it is
+not buried in the limitations list. **A block applies to every program on this machine.**
+
+macOS has exactly one API that can filter per application, `NEFilterDataProvider`, and it
+needs the entitlement this project exists to avoid. The mechanism Beholder can reach — pf —
+matches addresses, ports, protocols and interfaces, and has no concept of a process. So
+attribution answers *what is worth blocking* and the block then applies to everything.
+
+The other half of the same limit: one address commonly serves many names. Blocking a CDN
+address to stop one tracker stops everything else behind that address, and there is no
+passive way to find out from the outside what those are. Beholder is unusually well placed
+to *tell* you which application is talking to something, and no better placed than anything
+else to stop only that application from doing it.
+
+Host names are refused for a related reason. A name is not something pf can match on, and
+resolving one when the list is read would freeze a single answer for a record that rotates —
+it would stop matching within the hour and give no sign that it had. The list takes
+addresses and networks:
+
+```
+93.184.216.34        # example.com
+10.0.0.0/8           # the whole lab network
+2606:2800:220:1::/64
+```
+
+The note after the `#` is worth writing. A list of bare addresses is unreadable a month
+later, when the question is "what is this and can I remove it".
+
+### The rules
+
+Four words, each chosen against an alternative, and there are tests pinning all of them:
+
+```
+table <beholder_blocked> persist
+block return out log quick from any to <beholder_blocked>
+```
+
+- **`quick`** — pf is last-match-wins. Without it, a rule in an anchor that some system
+  service inserted while Beholder was not looking could pass a packet this rule had already
+  matched.
+- **`return`, not `drop`** — pf generates the refusal itself, a TCP RST or an ICMP
+  unreachable, from the kernel, addressed to the local program that sent the packet. The
+  application fails immediately instead of hanging until its own timeout. The alternative
+  considered and rejected was injecting a reset from userspace, which would have meant
+  Beholder crafting packets — a far larger claim than this project should make, and worse in
+  every particular: TCP only, racy, and after the first data has already gone.
+- **`out`** — this machine's own traffic. Inbound filtering is the built-in firewall's job.
+- **`log`** — blocked packets go to `pflog0`, so "did that actually block anything" has an
+  answer instead of being inferred from an absence:
+
+```bash
+sudo tcpdump -n -e -ttt -i pflog0
+```
+
+**The ruleset is static and the table is dynamic, and that split is the security design.**
+Rule text is written once, at install time. Nothing derived from a block list, a captured
+packet or a DNS answer is ever concatenated into a pf rule; the only thing that changes
+while running is which addresses are in a table, and every one of those has been through
+the address parser and been re-rendered by `inet_ntop`. `pfctl` is spawned with an argument
+vector and an absolute path — no shell, so nothing in an argument can be read as syntax, and
+no `PATH` lookup, so a root process cannot be pointed at a different `pfctl`.
+
+### Changing what is blocked, and who may
+
+The daemon's **publishing socket is still strictly read-only**. It accepts no command, and
+everything that merely watches — the terminal view, the MCP server, anything else you
+connect — still cannot change anything by any route. Blocking is changed over a **second,
+separate socket** that authenticates its peer.
+
+Splitting them rather than widening the first is what keeps the old guarantee intact. A
+reader on the publishing socket learns only what `lsof` would already tell it, so it needs
+no admission control; a writer needs a great deal, and the two do not belong on one path.
+
+#### File permissions cannot guard a writer
+
+This is the part that kept the socket read-only for so long, and the reasoning that was
+wrong. Both ends run as **you**. Mode 0600 keeps other accounts out and keeps nothing else
+out — anything running as your account can open the socket. For a reader that is fine. For a
+writer it is not, and the thing worth blocking is not your browsing but your update server,
+or whatever else would notice something was wrong.
+
+The missing piece was thought to be a signing identity, which this project has no way to
+obtain. It is not. What is needed is a **stable** identity, not an Apple-issued one — and an
+ad-hoc signature already provides one:
+
+```bash
+codesign -dr - --verbose=0 .build/Beholder.app
+# designated => cdhash H"1efb2e37dba21cbc79bc7e8ee9b039cb0a0fb42b"
+```
+
+`install-control-pin.sh` records that requirement in a root-owned file, and the daemon admits
+a connection only from a process that satisfies it. Three details make it hold:
+
+- **The peer is identified by audit token, never by pid.** `LOCAL_PEERPID` names a process
+  that can exit between the lookup and the check, with the number reused by something else.
+  `LOCAL_PEERTOKEN` names *that* process and cannot be recycled.
+- **The check is on the running code, not on a file.** `SecCodeCheckValidity` against a
+  `SecCode` built from the audit token validates the process as it is now. Reading the cdhash
+  of an executable's path checks a file that need not be what is running — and that is not a
+  hypothetical: Homebrew's `python3` re-execs into `Python.app`, so the binary you invoked and
+  the code that runs have different hashes. `test-control-socket.sh` exercises exactly this.
+- **The app is signed with the hardened runtime.** Without it, another process as your account
+  could inject code into the app and speak as it; library validation closes the ordinary path.
+  An account-level attacker with a debugger remains out of scope, and saying otherwise would
+  be the reassuring kind of wrong.
+
+**Rebuilding the app changes its cdhash**, so a rebuilt app is a different program until it is
+pinned again. That is the point of an identity rather than a name. `make reload` re-pins as
+part of the rebuild; a manual `make app` needs `make control-pin` after it.
+
+One consequence of authenticating on accept is worth knowing, because it cost an
+afternoon: the daemon refuses by **replying and then closing**, so a client that fails the
+check can find the socket gone before it has written anything. Writing to it then raises
+SIGPIPE, which by default kills the process with no message and no crash report — which is
+exactly how a stale pin presented, as the app silently quitting the moment anyone opened the
+Blocking tab. The client sets `SO_NOSIGPIPE`, the app ignores the signal process-wide as the
+daemon has always done, and a failed write no longer discards the refusal that explains it.
+
+The MCP server reaches none of this. It is read-only by construction, and a surface driven by
+generated text is the last thing that should be able to change a firewall — the same reasoning
+that keeps [`query_sql` from existing](#asking-it-questions).
+
+#### Two lists, and only one of them is rewritten
+
+`blocklist.conf` is written by a person and carries their comments; the daemon never
+regenerates it. What the app blocks goes to `blocklist.app.conf` beside it, which the daemon
+owns and rewrites freely. pf enforces the union.
+
+The asymmetry that falls out is deliberate and shown in the UI rather than hidden: **the app
+can take back what the app added, and cannot take back what the file pinned.** Something
+blocked by the root-only file stays blocked until root edits that file. A program that
+regenerated a hand-edited config would eventually eat the notes explaining why each line is
+there.
+
+The file can still be edited directly, with no app involved:
+
+```bash
+sudo $EDITOR /usr/local/etc/beholder/blocklist.conf
+sudo kill -HUP $(pgrep -x beholderd)
+```
+
+#### From the app
+
+The **Blocking** tab lists what is blocked and by which file, and any connection's context
+menu offers to block its address. The menu item says "Block 93.184.216.34 **for everything**"
+rather than naming the process, because pf has no concept of one — a label naming the app
+would be the reassuring lie this whole section exists to avoid.
+
+### It refuses rather than half-working
+
+Every failure stops the daemon instead of continuing without enforcement: no anchor, an
+unreadable list, a list your account can write, a single line that does not parse. Capture
+carrying on quietly while blocking is off would leave someone believing a destination is
+unreachable when it is not, and being wrong in the reassuring direction is the worst way to
+be wrong. It is the same rule `ProtocolSniffer` follows in never guessing `encrypted`.
+
+That is why a list with one bad line is refused whole. Enforcing the part that happens to
+parse means the entry you got wrong is the one silently not blocked.
+
+### It lasts exactly as long as the daemon
+
+Stopping capture unblocks everything: the table is emptied and pf's reference handed back
+on the way out, including from `Ctrl-C`, `SIGTERM` and every internal failure path. The
+alternative — leaving the table populated so blocks survive — was rejected because it turns
+a crash into a machine with a firewall nobody is managing and no obvious reason why a site
+stopped loading. Being able to stop the observer and have the network return to normal is
+worth more than blocks that persist.
+
+A daemon killed with `SIGKILL` runs no cleanup, which is the one case that leaves rules
+behind:
+
+```bash
+make unblock        # empty the table, now
+make block-status   # what pf is blocking for Beholder right now
+```
+
+### What it changes on your system
+
+`Scripts/uninstall-pf-anchor.sh` removes the first two; the rest are Beholder's own files
+under `/usr/local/etc/beholder`, which no uninstaller deletes:
+
+| | |
+|---|---|
+| `/etc/pf.anchors/com.beholder` | the rules |
+| `/etc/pf.conf` | three marked lines naming and loading them |
+| `blocklist.conf` | what you asked to block. Yours; never rewritten |
+| `blocklist.app.conf` | what the app asked to block. The daemon's; rewritten freely |
+| `control-peer.requirement` | the code identity allowed to change blocking |
+
+The second is unavoidable and worth understanding. **A nested anchor is only evaluated if
+the main ruleset names it** — an anchor file on its own loads without complaint and blocks
+nothing. Apple's comment at the top of `pf.conf` says the main ruleset must not be flushed
+for exactly this reason, which is also why the installer validates with `pfctl -n` and keeps
+a backup before it commits.
+
+Two consequences to know before running it:
+
+- **Loading `pf.conf` drops anchors that running services inserted dynamically.** Internet
+  Sharing does this, and so do some VPN clients. They re-insert theirs when they next start,
+  and a reboot settles everything.
+- **A macOS update can restore the stock `pf.conf`**, which removes those three lines and
+  silently disarms every block. `beholderd --block` checks for this at startup and refuses
+  to run rather than pretending, and `make doctor` reports it — but a daemon installed
+  without `--block` gives no sign, so it is worth knowing the failure exists.
+
+pf itself is shared. Beholder takes a reference with `pfctl -E` and gives it back with
+`-X`, never `-e`/`-d`, because `/etc/pf.conf` asks for exactly that in its own comments:
+switching pf off underneath Internet Sharing or a VPN client that had switched it on is a
+fault that surfaces as somebody else's firewall quietly not working.
 
 ## Capturing continuously
 

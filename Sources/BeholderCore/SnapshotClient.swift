@@ -74,38 +74,19 @@ public enum SnapshotClient {
     ///
     /// The caller owns the descriptor and must close it.
     public static func connect(to path: String) throws -> Int32 {
-        let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard descriptor >= 0 else {
-            throw Failure.cannotConnect(path: path, reason: errorText(errno))
-        }
-
-        var address = sockaddr_un()
-        address.sun_family = sa_family_t(AF_UNIX)
-        let pathBytes = Array(path.utf8)
-        guard pathBytes.count < MemoryLayout.size(ofValue: address.sun_path) else {
-            close(descriptor)
-            throw Failure.cannotConnect(
-                path: path, reason: "the path is too long for a Unix domain socket"
-            )
-        }
-        withUnsafeMutableBytes(of: &address.sun_path) { $0.copyBytes(from: pathBytes) }
-        address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
-
-        let result = withUnsafePointer(to: &address) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                Darwin.connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
-            }
-        }
-        guard result == 0 else {
-            // Captured before anything else can run and overwrite it.
-            let code = errno
-            close(descriptor)
-            throw failure(forConnectErrno: code, path: path)
+        let descriptor: Int32
+        switch UnixSocket.connect(to: path) {
+        case .success(let opened):
+            descriptor = opened
+        case .failure(let failure):
+            throw self.failure(forConnect: failure, path: path)
         }
 
         // This client never sends. Closing the write half makes that structural rather
         // than merely true, so a future edit cannot quietly turn a reader into a writer:
-        // the daemon accepts no commands and an unauthenticated writer would be a real hole.
+        // the daemon accepts no commands on this socket and an unauthenticated writer would
+        // be a real hole. It is also why `ControlClient` cannot use this function — a write
+        // after this line returns EPIPE, every time.
         shutdown(descriptor, SHUT_WR)
         return descriptor
     }
@@ -118,6 +99,32 @@ public enum SnapshotClient {
         let descriptor = try connect(to: path)
         defer { close(descriptor) }
 
+        // A partial line here is a fault, not a short answer: the daemon streams whole
+        // snapshots, so a connection that closes mid-message has failed to frame one.
+        let line = try readLine(
+            from: descriptor, path: path, deadline: deadline,
+            maximum: maximumMessageBytes, closeCompletesMessage: false)
+        return try decode(line)
+    }
+
+    /// Reads one newline-terminated message, or gives up.
+    ///
+    /// Shared with `ControlClient`, which had grown its own copy of this loop — the receive
+    /// timeout, the chunked append, the newline search, the size bound and the `EINTR` retry
+    /// are the same on both sockets because both carry newline-delimited JSON.
+    ///
+    /// `closeCompletesMessage` is the one place they genuinely disagree, so it is the one
+    /// thing parameterised. For the publishing socket a peer that closes has failed to
+    /// deliver a frame. For the control socket it is ordinary: the daemon authenticates on
+    /// accept and refuses by replying and hanging up, so buffered bytes plus a closed
+    /// connection is a complete answer.
+    static func readLine(
+        from descriptor: Int32,
+        path: String,
+        deadline: TimeInterval,
+        maximum: Int,
+        closeCompletesMessage: Bool
+    ) throws -> Data {
         // Bound each individual read as well as the whole operation. Without this a
         // connected-but-silent daemon parks the caller in `read` forever and no overall
         // deadline can fire, because nothing ever returns to check it. The same shape as
@@ -137,16 +144,15 @@ public enum SnapshotClient {
             if count > 0 {
                 buffer.append(contentsOf: bytes[0..<count])
                 if let newline = buffer.firstIndex(of: 0x0A) {
-                    return try decode(buffer[buffer.startIndex..<newline])
+                    return buffer[buffer.startIndex..<newline]
                 }
-                guard buffer.count <= maximumMessageBytes else {
+                guard buffer.count <= maximum else {
                     throw Failure.unframed(bytesRead: buffer.count)
                 }
                 continue
             }
             if count == 0 {
-                // The daemon closed the connection. Anything buffered is a partial line
-                // and there will be no more, so this is the same fault as a missing frame.
+                if closeCompletesMessage, !buffer.isEmpty { return buffer }
                 throw Failure.unframed(bytesRead: buffer.count)
             }
             // EAGAIN is the receive timeout expiring, which is expected while waiting for
@@ -174,6 +180,19 @@ public enum SnapshotClient {
     }
 
     /// Separates "not running" from "not yours", which is the whole point of this type.
+    /// Turns a failed connect into the sentence a person should read.
+    ///
+    /// Shared with `ControlClient`, which opens its socket through `UnixSocket` rather than
+    /// through `connect(to:)` below, but wants the same words: the two situations worth
+    /// telling apart — nothing listening, and a socket belonging to another account — are
+    /// the same on either socket and have the same two fixes.
+    static func failure(forConnect failure: UnixSocket.Failure, path: String) -> Failure {
+        guard case .cannotBind(_, let code) = failure else {
+            return .cannotConnect(path: path, reason: failure.description)
+        }
+        return self.failure(forConnectErrno: code, path: path)
+    }
+
     private static func failure(forConnectErrno code: Int32, path: String) -> Failure {
         switch code {
         case ENOENT, ECONNREFUSED:

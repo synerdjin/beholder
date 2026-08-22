@@ -3,15 +3,16 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 Beholder is a macOS network traffic visualizer: which process is talking to whom, where in
-the world that is, and how much data is moving. It observes; it never blocks.
+the world that is, and how much data is moving. It observes by default; with `--block` it
+also stops traffic to destinations named in a root-owned list.
 
 ## Commands
 
 ```bash
-make check          # the gate: build (fails on ANY warning) + tests + both shell smoke tests
+make check          # the gate: build (fails on ANY warning) + tests + the shell tests
 make build          # daemon + app bundle
 swift test          # unit tests only
-make help           # all ~40 targets
+make help           # every target
 ```
 
 Needing root (capture reads `/dev/bpf*`, mode 0600 root:wheel):
@@ -88,16 +89,19 @@ Five SwiftPM targets plus a test target. **There is no Xcode project and none is
 **The daemon holds all privilege and all state; every other binary is a reader.** The app
 and the MCP server can be closed, crash, or never run without interrupting capture.
 
-### Two independent channels out of the daemon
+### Channels out of the daemon, and the one in
 
 1. **Live** — a Unix domain socket (`/var/run/beholder.sock`) carrying newline-delimited
    JSON, one whole `FlowSnapshot` per second. Not XPC: that wants a `MachServices` entry
-   and a signing identity this project deliberately does without. The daemon is **strictly
-   read-only over the socket** — it accepts no command that changes state, so an
-   unauthenticated reader learns only what `lsof` would already tell them, whereas an
-   unauthenticated *writer* would be a real hole. Preserve that property.
+   and a signing identity this project deliberately does without. This socket is **strictly
+   read-only** — it accepts no command at all, so an unauthenticated reader learns only what
+   `lsof` would already tell them. Preserve that: widening it would make every reader a
+   potential writer, and a writer here gets a firewall.
 2. **Historical** — a SQLite database that readers open **read-only**, so it works when
    nothing is capturing, which is exactly when you want to look at it.
+3. **Control** — a *second* socket (`/var/run/beholder-control.sock`) that does accept
+   commands, and therefore authenticates its peer against a pinned code identity. Only
+   blocking travels over it; see below.
 
 `WireProtocol.swift` is the contract for (1) and lives in Core precisely so the two ends
 cannot disagree about it. Bump `WireProtocol.version` on any incompatible change; both
@@ -151,6 +155,56 @@ display parsers in `PayloadRendering.swift` (`HTTPPreview`, `HexDump`) — all i
 in the daemon or the app, because they are the parts worth testing. `HTTPPreview` in
 particular parses bytes chosen by whoever is on the far end.
 
+### Blocking is by destination, opt-in, and configured by file
+
+`--block` fills a pf table from a root-owned block list. Five rules that are load-bearing:
+
+- **The ruleset is static; only the table changes.** `PacketFilterPlan.anchorRuleset` is
+  written once by `install-pf-anchor.sh` and never generated. Nothing derived from a list,
+  a packet or a DNS answer is concatenated into a pf rule — the only runtime change is
+  table membership, and every entry has been through `IPAddress` and back out of
+  `inet_ntop`. `pfctl` is spawned with an argv and an absolute path, never a shell, never
+  `PATH`. Do not add a code path that builds rule text at run time.
+- **The publishing socket stays read-only; commands go over a second socket that
+  authenticates its peer.** Widening the first would have made every reader a potential
+  writer. `ControlServer` admits a connection only when the peer's audit token
+  (`LOCAL_PEERTOKEN`, never `LOCAL_PEERPID` — pids get reused) yields a `SecCode` satisfying
+  a requirement pinned in a root-owned file. An ad-hoc `cdhash` is a perfectly good identity;
+  no Developer ID is involved. The MCP server reaches none of it.
+- **Two list files, and only one is rewritten.** `blocklist.conf` is a person's, and the
+  daemon never regenerates it; `blocklist.app.conf` is the daemon's. pf enforces the union,
+  and `EnforcedBlockList` marks fixed entries non-removable so the UI cannot offer a button
+  that would fail. Both files must be root-owned and not group- or other-writable —
+  `BlockList.verdict` decides that, and takes a `readerUID` so an unprivileged process can
+  apply the same rule to a file it owns without loosening it.
+- **Anything that writes to a socket must guard SIGPIPE.** The control server authenticates
+  on *accept* and refuses by replying and closing, so a client can find the peer gone before
+  it has written a byte. `SnapshotClient.connect` sets `SO_NOSIGPIPE`, the app ignores SIGPIPE
+  process-wide as the daemon does, and `ControlClient` reads the reply even when the write
+  failed — the refusal explaining why is already in the receive buffer. Without this the app
+  died on exit 141 with no message and no crash report. A python3-driven shell test cannot
+  catch it, because Python ignores SIGPIPE by default; `ControlClientTests` uses a real
+  in-process server that hangs up immediately.
+- **A note is the only free text that becomes file content.** `BlockList.render` strips
+  newlines and `#` from it; without that, a note could write a destination of its own onto
+  the next line. There is a test pinning it.
+- **It refuses rather than half-works.** No anchor, an unreadable list, one unparsable line
+  — all of them stop the daemon. Enforcing the part of a list that happens to parse leaves
+  someone believing a destination is blocked when it is not, which is the same failure
+  `ProtocolSniffer` avoids by never guessing `encrypted`.
+- **Blocking lasts exactly as long as the daemon.** Teardown is an `atexit` hook, so it
+  covers every path that calls `exit` including `fail()`. `SIGKILL` runs nothing, which is
+  what `make unblock` is for. Do not make blocks persist across a stop.
+- **By destination, never by process.** pf cannot match a process and no entitlement-free
+  API can. `BlockList.Entry` deliberately has no process field, and any UI built on this
+  must not imply otherwise.
+
+`quick`, `return`, `out` and `log` in the rule were each chosen against a named alternative
+and are pinned by tests; the reasoning is in `PacketFilterPlan` and in the README. The
+anchor text has exactly one source — `beholderd --print-pf-anchor` — because two copies of a
+pf ruleset in two languages drift, and the drift shows up as an anchor that loads cleanly
+and matches nothing.
+
 ### `cleartext` is proof, `encrypted` is inference, `unknown` is neither
 
 `ProtocolSniffer` classifies every connection, always, whether or not payload reading is
@@ -190,14 +244,33 @@ package to solve a problem of this size.
 **`make check` fails on any warning.** Not just errors.
 
 **Executable targets cannot be reached by unit tests**, so behaviour that only exists in a
-binary is covered by shell tests in `Scripts/` driven by `python3`
-(`test-publishing-socket.sh`, `test-mcp-stdio.sh`). Both are wired into `make check`. If
-you add logic to an executable, either move it into `BeholderCore` where a test can reach
+binary is covered by shell tests in `Scripts/` (`test-publishing-socket.sh`,
+`test-mcp-stdio.sh`, `test-pf-anchor.sh`, `test-control-socket.sh`), sharing their assertions
+from `Scripts/lib/test-helpers.sh`. All four are wired into `make check`. **A python3-driven
+shell test proves the daemon, never the Swift client** — Python ignores SIGPIPE and buffers
+writes, so two client faults hid behind a passing suite: the app dying on SIGPIPE, and every
+control request failing to send because `SnapshotClient.connect` ends in `shutdown(SHUT_WR)`.
+Anything the app does over a socket needs an in-process test with a real peer, and the fake
+peer must *read the request* before replying or it cannot tell a working client from one whose
+every write fails. The control one proves peer authentication in *both* directions and discovers
+the peer's identity from the daemon's own refusal rather than from the interpreter's path —
+because Homebrew's `python3` re-execs into `Python.app`, which is the same trap the
+authenticator exists to avoid. The pf one guards the same class of bug as the MCP one with a
+worse blast radius: `install-pf-anchor.sh` redirects `--print-pf-anchor` straight into
+`/etc/pf.anchors`, so a stray `print()` in the startup path writes a corrupt ruleset into a
+system file rather than producing a confusing message.
+
+If you add logic to an executable, either move it into `BeholderCore` where a test can reach
 it, or extend the matching shell test.
 
 **Put contracts in `BeholderCore`, not in the executable.** The rule "no privilege, testable
 without root" is what Core is protecting — value types and pure functions belong there even
-when they describe I/O.
+when they describe I/O. `UnixSocket` (bind, connect, the `sockaddr_un` dance, the stale-socket
+probe), `SecureFile` (the "not writable by anyone less privileged than its reader" rule) and
+`EnforcedBlockList.read` all live there because each had been written two or three times
+across the two servers and the two list readers. The tell is always the same: a preview
+command and the daemon it previews disagreeing, or one copy of a security check being subtly
+kinder than the next.
 
 **`BeholderPaths` resolves `SUDO_USER`.** Capture runs under `sudo` and must write to the
 invoking user's Application Support, never root's. A tool started via `su -` rather than
@@ -241,11 +314,13 @@ contents of traffic, while measurement reads only headers the kernel already han
 More decisively, measurement has to be running when the trouble happens, so an opt-in flag
 would leave the data missing exactly when someone goes looking for it.
 
-**`--probe` is the only thing here that sends.** It is off by default and announces itself
-on startup. It exists for the two questions passive capture cannot answer at all — whether
-the link worked while idle, and whether a fault is the local Wi-Fi or the uplink — and its
-results are excluded from Beholder's own measurements *by process*, never by a capture
-filter, since a filter on those addresses would also hide genuine traffic to them.
+**`--probe` is the only thing here that sends, and `--block` the only thing that changes
+what the machine can reach.** Both are off by default and announce themselves on startup;
+neither is something to make implicit. `--probe` exists for the two questions passive
+capture cannot answer at all — whether the link worked while idle, and whether a fault is
+the local Wi-Fi or the uplink — and its results are excluded from Beholder's own
+measurements *by process*, never by a capture filter, since a filter on those addresses
+would also hide genuine traffic to them.
 
 **There is no `query_sql` MCP tool and there should never be one.** Read-only SQLite still
 reaches other files via `ATTACH`, still returns unbounded results, and turns a fixed set of

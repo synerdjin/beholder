@@ -36,6 +36,51 @@ else
 fi
 echo
 
+# Blocking, when it has been installed at all. Reported before the socket because the
+# failure it looks for is silent: pf.conf is a system file, and a macOS update can restore
+# the stock copy, which removes the line naming Beholder's anchor. Everything else keeps
+# working - the daemon starts, the app connects, the block list still lists what it always
+# did - and nothing is blocked. beholderd --block refuses to start in that state, but a
+# daemon installed without --block gives no sign at all.
+if [[ -f /etc/pf.anchors/com.beholder ]]; then
+    echo "Blocking:"
+    if grep -qF "anchor \"com.beholder\"" /etc/pf.conf 2> /dev/null; then
+        echo "  /etc/pf.conf names the anchor"
+    else
+        echo "  ANCHOR FILE PRESENT BUT /etc/pf.conf DOES NOT NAME IT."
+        echo "  Nothing is being blocked, whatever the block list says."
+        echo "  A macOS update restoring the stock /etc/pf.conf does exactly this."
+        echo "  Fix: sudo ./Scripts/install-pf-anchor.sh"
+    fi
+    # Asked of the daemon rather than answered here. "Does this build satisfy the pin" is a
+    # code-requirement question, and deciding it by string-comparing `codesign` output to the
+    # pin file is a different test that can disagree — for a Developer ID pin, the case
+    # install-control-pin.sh explicitly plans for. A diagnostic that can be wrong about the
+    # failure it exists to catch is worse than none.
+    DAEMON_BIN="${ROOT}/.build/debug/beholderd"
+    [[ -x "${DAEMON_BIN}" ]] || DAEMON_BIN="${ROOT}/.build/release/beholderd"
+    [[ -x "${DAEMON_BIN}" ]] || DAEMON_BIN="/usr/local/libexec/beholderd"
+
+    if [[ -x "${DAEMON_BIN}" ]]; then
+        "${DAEMON_BIN}" --check-control-pin "${ROOT}/.build/Beholder.app" 2> /dev/null | sed 's/^/  /'
+    else
+        echo "  no beholderd built; cannot check the pinned identity"
+    fi
+
+    if [[ $EUID -eq 0 ]]; then
+        RULES="$(/sbin/pfctl -a com.beholder -s rules 2> /dev/null)"
+        if grep -q beholder_blocked <<< "${RULES}"; then
+            COUNT="$(/sbin/pfctl -a com.beholder -t beholder_blocked -T show 2> /dev/null | grep -c . || true)"
+            echo "  anchor loaded, ${COUNT} destination(s) currently blocked"
+        else
+            echo "  anchor is not loaded into the running ruleset"
+        fi
+    else
+        echo "  (run under sudo to see what is currently blocked)"
+    fi
+    echo
+fi
+
 echo "Publishing socket:"
 if [[ -S "${SOCKET}" ]]; then
     ls -la "${SOCKET}"

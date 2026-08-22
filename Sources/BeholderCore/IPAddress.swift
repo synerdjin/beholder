@@ -162,6 +162,33 @@ public struct IPAddress: Hashable, Sendable, CustomStringConvertible {
         !isLoopback && !isLinkLocal && !isPrivate && !isMulticast
     }
 
+    /// The address with every bit below `prefixLength` cleared.
+    ///
+    /// Used to canonicalise a network before it becomes a pf table entry, so that
+    /// `192.168.1.5/24` and `192.168.1.0/24` are one entry rather than two spellings of it.
+    /// Without that, a reload would compute a difference against what pf already holds and
+    /// add and remove the same network forever.
+    ///
+    /// Swift's shift operators are non-masking, so a shift of the full width yields zero
+    /// rather than the undefined behaviour the C equivalent would have here — which is what
+    /// makes the `/0` case fall out without a special case.
+    public func masked(prefixLength: UInt8) -> IPAddress {
+        switch family {
+        case .v4:
+            guard prefixLength < 32 else { return self }
+            let mask = (~UInt64(0) << (32 - UInt64(prefixLength))) & 0xFFFF_FFFF
+            return IPAddress(family: .v4, high: 0, low: low & mask)
+        case .v6:
+            guard prefixLength < 128 else { return self }
+            if prefixLength >= 64 {
+                let mask = ~UInt64(0) << (128 - UInt64(prefixLength))
+                return IPAddress(family: .v6, high: high, low: low & mask)
+            }
+            let mask = ~UInt64(0) << (64 - UInt64(prefixLength))
+            return IPAddress(family: .v6, high: high & mask, low: 0)
+        }
+    }
+
     public var isMulticast: Bool {
         switch family {
         case .v4: return UInt32(truncatingIfNeeded: low) >> 28 == 0xE     // 224/4

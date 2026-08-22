@@ -48,6 +48,22 @@ public enum BeholderPaths {
         dataDirectory() + "/history.sqlite"
     }
 
+    /// Hands a file the daemon created to the user who invoked `sudo`.
+    ///
+    /// Capture runs as root, and every file it makes for the app to read — the socket, the
+    /// transcript — has to belong to the person the data is about rather than to root, or
+    /// the app cannot open it. Here rather than in each server for the reason this type
+    /// exists: two copies of this eventually disagree about which environment variables to
+    /// read.
+    public static func giveToInvokingUser(_ path: String) {
+        let environment = ProcessInfo.processInfo.environment
+        guard
+            let uidText = environment["SUDO_UID"], let uid = uid_t(uidText),
+            let gidText = environment["SUDO_GID"], let gid = gid_t(gidText)
+        else { return }
+        chown(path, uid, gid)
+    }
+
     public static func nameCache() -> String {
         dataDirectory() + "/names.json"
     }

@@ -209,6 +209,10 @@ private struct ProcessRow: View {
 private struct FlowRow: View {
     let flow: WireFlow
 
+    /// Optional on purpose: every other use of this row works without a control socket, and
+    /// a view that traps when blocking is unavailable would be a poor trade for one menu item.
+    @Environment(BlockingModel.self) private var blocking: BlockingModel?
+
     var body: some View {
         HStack(spacing: 8) {
             Text(flow.transport)
@@ -293,7 +297,47 @@ private struct FlowRow: View {
             }
             Divider()
             Button("Copy connection details") { copy(details(flow)) }
+
+            if let blocking {
+                Divider()
+                // Named for what it does rather than for what someone might hope it does.
+                // pf has no concept of a process, so this stops every program on the machine
+                // reaching that address — including this one's neighbours behind a shared
+                // CDN address. Saying "Block \(process)" would be the reassuring lie.
+                if let removable = blocking.removableEntry(for: flow.remoteAddress) {
+                    Button("Unblock \(removable.destination) for everything") {
+                        Task { await blocking.unblock(removable.destination) }
+                    }
+                } else if let covering = blocking.coveringEntry(for: flow.remoteAddress) {
+                    // Blocked, but not by an entry naming this address — a network covers it,
+                    // and possibly one from the root-owned list. Offering "Unblock
+                    // \(flow.remoteAddress)" here produced a button that always failed, which
+                    // is exactly what `isRemovable` exists elsewhere to prevent. Say what is
+                    // holding it instead.
+                    Button("Blocked by \(covering.destination)") {}
+                        .disabled(true)
+                } else {
+                    Button("Block \(flow.remoteAddress) for everything") {
+                        Task {
+                            await blocking.block(
+                                flow.remoteAddress, note: blockNote(flow))
+                        }
+                    }
+                }
+            }
         }
+    }
+
+    /// What to record beside the address in the block list.
+    ///
+    /// The host name and the process that was talking to it, because a bare address is
+    /// unreadable a month later — and because the process is the reason someone blocked it
+    /// even though the block does not apply to that process alone.
+    private func blockNote(_ flow: WireFlow) -> String {
+        var parts: [String] = []
+        if let hostName = flow.hostName { parts.append(hostName) }
+        if let process = flow.processName { parts.append("seen from \(process)") }
+        return parts.isEmpty ? "blocked from Beholder.app" : parts.joined(separator: " — ")
     }
 
     private func copy(_ text: String) {

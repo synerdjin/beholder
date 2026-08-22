@@ -1,10 +1,25 @@
 import BeholderCore
 import Charts
+import Darwin
 import SwiftUI
 
 @main
 struct BeholderApp: App {
     @State private var client = FlowClient()
+
+    init() {
+        // The app writes to a socket now, and writing to one whose peer has closed raises
+        // SIGPIPE, whose default disposition terminates the process — silently, with no
+        // message and no crash report, which is exactly how it presented: opening the
+        // Blocking tab quit the app and left nothing behind to explain it.
+        //
+        // The daemon has ignored SIGPIPE process-wide since a reader disconnecting could
+        // stop capture. The app never needed it while it only ever read. It does now, and
+        // the same argument applies: the per-socket SO_NOSIGPIPE set in `SnapshotClient` is
+        // the real guard, and this is the backstop for any socket that ever gets opened
+        // without it.
+        signal(SIGPIPE, SIG_IGN)
+    }
 
     var body: some Scene {
         Window("Beholder", id: "main") {
@@ -143,6 +158,7 @@ private enum Presentation: String, CaseIterable, Identifiable {
     case cleartext = "Cleartext"
     case map = "Map"
     case quality = "Quality"
+    case blocking = "Blocking"
     case history = "History"
     var id: String { rawValue }
 
@@ -152,6 +168,7 @@ private enum Presentation: String, CaseIterable, Identifiable {
         case .cleartext: return "lock.open"
         case .map: return "globe"
         case .quality: return "speedometer"
+        case .blocking: return "hand.raised"
         case .history: return "clock.arrow.circlepath"
         }
     }
@@ -164,6 +181,7 @@ private struct MainView: View {
     @State private var unidentifiedOnly = false
     @State private var history = HistoryModel()
     @State private var quality = QualityModel()
+    @State private var blocking = BlockingModel()
     @State private var exposedSelection: WireFlow.ID?
 
     var body: some View {
@@ -174,6 +192,14 @@ private struct MainView: View {
                 HistoryHeader(presentation: $presentation)
                 Divider()
                 HistoryView(model: history)
+            } else if presentation == .blocking {
+                // Blocking reads its own socket and says its own piece about a daemon that
+                // is absent, so it is not sent to the "waiting for a snapshot" screen. The
+                // reasons a snapshot is missing and the reasons blocking is unreachable are
+                // different, and one screen cannot say both well.
+                HistoryHeader(presentation: $presentation)
+                Divider()
+                BlockingView(model: blocking)
             } else if presentation == .quality, client.snapshot == nil {
                 // Quality is half live and half recorded. With no daemon the recorded half
                 // is still worth reading, so this screen is not sent to the waiting view
@@ -218,8 +244,8 @@ private struct MainView: View {
                         model: quality,
                         waitingState: client.state
                     )
-                case .history:
-                    // Handled above; history needs no live snapshot.
+                case .blocking, .history:
+                    // Both handled above; neither needs a live snapshot.
                     EmptyView()
                 }
             } else {
@@ -230,6 +256,9 @@ private struct MainView: View {
                 }
             }
         }
+        // Reaches the connection rows, so a destination can be blocked from where it is
+        // seen rather than by copying an address into another screen.
+        .environment(blocking)
     }
 }
 
