@@ -499,14 +499,16 @@ struct ConnectionTimeoutRuleTests {
         at start: Date,
         synAck: Bool = false,
         reset: Bool = false,
-        outbound: Bool = true
+        outbound: Bool = true,
+        local: IPAddress = laptop,
+        remote: IPAddress = server
     ) -> Flow {
         var flow = Flow(
             key: FlowKey(
                 transport: .tcp,
-                local: laptop,
+                local: local,
                 localPort: 51234,
-                remote: server,
+                remote: remote,
                 remotePort: 443
             ),
             interfaceName: "en0",
@@ -557,5 +559,72 @@ struct ConnectionTimeoutRuleTests {
             !attempt(at: start, outbound: false)
                 .connectionTimedOut(at: start.addingTimeInterval(30))
         )
+    }
+}
+
+@Suite("Devices on the local network")
+struct LocalNetworkTests {
+
+    private func key(_ local: String, _ remote: String) -> FlowKey {
+        FlowKey(
+            transport: .tcp, local: IPAddress(text: local)!, localPort: 51234,
+            remote: IPAddress(text: remote)!, remotePort: 62078)
+    }
+
+    /// The case that motivated the rule: macOS's usbmuxd knocking on a sleeping iPhone,
+    /// seen at every one of the addresses a phone holds on a home network.
+    @Test("Every address a phone holds at home is local")
+    func homeAddressesAreLocal() {
+        let mac = "2607:fea8:fe20:82a8:8d16:4888:4b07:78"
+        #expect(key("10.0.0.170", "10.0.0.190").remoteIsOnLocalNetwork)
+        #expect(key("192.168.1.5", "192.168.1.20").remoteIsOnLocalNetwork)
+        #expect(key("172.16.0.5", "172.20.0.9").remoteIsOnLocalNetwork)
+        #expect(key("169.254.1.1", "169.254.3.3").remoteIsOnLocalNetwork)
+        #expect(key("fe80::1", "fe80::491:4ef:c00e:4cb9").remoteIsOnLocalNetwork)
+        #expect(key("fd00::1", "fd00::2").remoteIsOnLocalNetwork)
+        #expect(key(mac, "2607:fea8:fe20:82a8::4e5").remoteIsOnLocalNetwork)
+    }
+
+    @Test("The internet is not local, nor is carrier NAT, nor a neighbouring /64")
+    func internetIsNotLocal() {
+        let mac = "2607:fea8:fe20:82a8:8d16:4888:4b07:78"
+        #expect(!key("10.0.0.170", "1.1.1.1").remoteIsOnLocalNetwork)
+        #expect(!key("10.0.0.170", "100.64.0.2").remoteIsOnLocalNetwork)
+        #expect(!key(mac, "2607:fea8:fe20:82a9::1").remoteIsOnLocalNetwork)
+        #expect(!key(mac, "2607:6bc0::10").remoteIsOnLocalNetwork)
+        // A link-local source says nothing about which /64 a global address is in.
+        #expect(!key("fe80::1", "2607:6bc0::10").remoteIsOnLocalNetwork)
+    }
+
+    @Test("The live summary counts local attempts apart, inside the totals")
+    func summaryCountsLocalApart() {
+        let start = Date(timeIntervalSince1970: 1_750_000_000)
+        func attempt(remote: String, answered: Bool) -> Flow {
+            var flow = Flow(
+                key: FlowKey(
+                    transport: .tcp, local: IPAddress(text: "10.0.0.170")!, localPort: 51234,
+                    remote: IPAddress(text: remote)!, remotePort: 62078),
+                interfaceName: "en0", at: start)
+            flow.record(
+                segment(at: 0, flags: [.syn]), direction: .outbound, at: start,
+                measuringQuality: true)
+            if answered {
+                flow.record(
+                    segment(at: 0.02, flags: [.syn, .ack]), direction: .inbound,
+                    at: start.addingTimeInterval(0.02), measuringQuality: true)
+            }
+            return flow
+        }
+        let summary = QualitySummary.summarise(
+            [
+                attempt(remote: "10.0.0.190", answered: false),
+                attempt(remote: "10.0.0.191", answered: true),
+                attempt(remote: "1.1.1.1", answered: false),
+            ],
+            at: start.addingTimeInterval(30))
+        #expect(summary.connectionAttempts == 3)
+        #expect(summary.connectionTimeouts == 2)
+        #expect(summary.localConnectionAttempts == 2)
+        #expect(summary.localConnectionTimeouts == 1)
     }
 }

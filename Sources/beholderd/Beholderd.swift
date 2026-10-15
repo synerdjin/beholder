@@ -40,6 +40,30 @@ enum Beholderd {
     /// `SIGKILL` still runs nothing, which is what `make unblock` exists for.
     private nonisolated(unsafe) static var packetFilter: PacketFilter?
 
+    /// What the daemon says about itself, built once at startup.
+    ///
+    /// Everything here is fixed for the life of the process except the block count, which
+    /// the publisher fills in per snapshot. This is the only place the failure to open the
+    /// history store reaches anywhere a reader can see it: until now it went to stderr and
+    /// nothing else, so an assistant asked why nothing was being recorded could not find out.
+    private static func daemonInfo(
+        monitor: FlowMonitor, options: Options, historyPath: String?,
+        historyError: String?, following: Bool
+    ) -> DaemonInfo {
+        let executable = Bundle.main.executablePath ?? CommandLine.arguments.first
+        let modified = executable.flatMap {
+            (try? FileManager.default.attributesOfItem(atPath: $0))?[.modificationDate] as? Date
+        }
+        return DaemonInfo(
+            pid: getpid(), executablePath: executable, executableModified: modified,
+            flags: DaemonInfo.Flags(
+                blockRequested: options.block, probing: options.probes,
+                qualityMeasurement: options.measuresQuality,
+                readingCleartext: options.readsCleartext, followingRoute: following),
+            historyStorePath: historyPath, historyStoreError: historyError,
+            enrichment: monitor.enrichmentSources)
+    }
+
     static func main() {
         // Line-buffer stdout. Swift block-buffers it when it is a file rather than a
         // terminal, so under launchd every status line sat in a buffer and was lost when
@@ -74,6 +98,18 @@ enum Beholderd {
         // Same reasoning: checking a block list reads a file and prints what it means.
         if options.checkBlocklist {
             exit(checkBlocklist(options))
+        }
+
+        // Likewise: this only reads, and a diagnostic that needed root to run could not be
+        // used by the person whose daemon is not running.
+        if options.diagnose {
+            let facts = DaemonDiagnosis.gather(
+                sourceDirectory: options.diagnoseSource.map {
+                    URL(fileURLWithPath: $0).standardizedFileURL.path
+                })
+            let report = DaemonDiagnosis.diagnose(facts)
+            print(DaemonDiagnosis.render(report))
+            exit(report.hasProblem ? 1 : 0)
         }
 
         if options.checkControlPin {
@@ -202,6 +238,10 @@ enum Beholderd {
                 print("Edit the list and `sudo kill -HUP \(getpid())` to reload it.")
                 print("Blocking stops when this daemon does.")
                 print("")
+            } catch PacketFilter.FilterError.anchorNotLoaded {
+                fail(
+                    PacketFilter.FilterError.anchorNotLoaded.description,
+                    status: BeholderPaths.blockRefusedExitCode)
             } catch {
                 fail("\((error as? PacketFilter.FilterError)?.description ?? "\(error)")")
             }
@@ -258,16 +298,23 @@ enum Beholderd {
         retained.append(engine)
 
         if let monitor {
+            var historyPath: String?
+            var historyError: String?
             if options.storeHistory, !options.selfTest {
                 switch monitor.openStore(at: options.historyPath ?? FlowStore.defaultPath()) {
                 case .success(let path):
+                    historyPath = path
                     note("recording history to \(path)")
                 case .failure(let error):
+                    historyError = "\(error)"
                     FileHandle.standardError.write(
                         Data("beholderd: \(error); continuing without history.\n".utf8)
                     )
                 }
             }
+            let selfReport = daemonInfo(
+                monitor: monitor, options: options, historyPath: historyPath,
+                historyError: historyError, following: followedInterface != nil)
             note("starting the flow monitor")
             monitor.start()
 
@@ -304,12 +351,18 @@ enum Beholderd {
                         )
                     }
                     let statistics = engine.statistics()
+                    var daemon = selfReport
+                    if let filter = Beholderd.packetFilter {
+                        daemon.blockingActive = true
+                        daemon.blockingEntryCount = filter.blockedCount()
+                    }
                     return monitor.wireSnapshot(
                         startedAt: startedAt,
                         interfaces: statistics.map(\.interfaceName),
                         packetsCaptured: statistics.reduce(0) { $0 + $1.counters.packets },
                         packetsDropped: statistics.reduce(0) { $0 + UInt64($1.kernelDropped) },
-                        transitions: activeSupervisor?.recordedTransitions().map(\.summary) ?? []
+                        transitions: activeSupervisor?.recordedTransitions().map(\.summary) ?? [],
+                        daemon: daemon
                     )
                 }
                 do {
@@ -598,8 +651,8 @@ enum Beholderd {
         FileHandle.standardError.write(Data("beholderd: \(message)\n".utf8))
     }
 
-    private static func fail(_ message: String) -> Never {
+    private static func fail(_ message: String, status: Int32 = 1) -> Never {
         FileHandle.standardError.write(Data("beholderd: \(message)\n".utf8))
-        exit(1)
+        exit(status)
     }
 }

@@ -687,6 +687,11 @@ public struct QualitySummary: Sendable, Equatable {
     public var connectionAttempts = 0
     public var connectionTimeouts = 0
     public var connectionRefusals = 0
+    /// The subset of the above aimed at devices on this machine's own network. Kept inside
+    /// the totals rather than removed from them, so the totals keep meaning what they always
+    /// meant; a reader that wants the internet alone subtracts.
+    public var localConnectionAttempts = 0
+    public var localConnectionTimeouts = 0
 
     public var discardedSamples: UInt64 = 0
     public var segmentOffloadFlowCount = 0
@@ -763,6 +768,8 @@ public struct QualitySummary: Sendable, Equatable {
                 flow.initiatedLocally == true
             else { continue }
             summary.connectionAttempts += 1
+            let isLocal = flow.key.remoteIsOnLocalNetwork
+            if isLocal { summary.localConnectionAttempts += 1 }
 
             if quality.sawSynAck { continue }
             if quality.sawReset {
@@ -772,6 +779,7 @@ public struct QualitySummary: Sendable, Equatable {
                 summary.connectionRefusals += 1
             } else if flow.connectionTimedOut(at: now) {
                 summary.connectionTimeouts += 1
+                if isLocal { summary.localConnectionTimeouts += 1 }
             }
         }
 

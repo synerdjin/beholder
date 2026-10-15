@@ -111,8 +111,10 @@ if len(parsed) == 3:
           "the client's requested protocol revision is echoed back")
     names = [tool["name"] for tool in parsed[1]["result"]["tools"]]
     check(names == ["network_history", "endpoint_lookup", "live_connections",
-                    "beholder_status", "network_quality"],
-          "the five tools are advertised under their documented names")
+                    "beholder_status", "beholder_doctor", "network_quality"],
+          "the six tools are advertised under their documented names")
+    check("cleartext_excerpts" not in names,
+          "the payload tool is not advertised unless it was asked for")
 
 # stderr is explicitly allowed to carry logging, and clients are told not to read it as
 # failure. The one-line privacy banner lives there.
@@ -132,6 +134,44 @@ try:
           "a missing database is reported by name rather than as an empty result")
 except Exception as error:  # noqa: BLE001
     check(False, f"a missing database still produces a well-formed result ({error})")
+
+# ----------------------------------------------------------- the payload tool is opt-in
+
+def call_tool(name, arguments=None, extra_args=()):
+    process = subprocess.Popen(ARGS + list(extra_args), stdin=subprocess.PIPE,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    requests = [
+        json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+        json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                    "params": {"name": name, "arguments": arguments or {}}}),
+    ]
+    out, err = process.communicate("".join(r + "\n" for r in requests).encode(), timeout=25)
+    return [json.loads(line) for line in out.decode().split("\n") if line], err.decode()
+
+
+replies, _ = call_tool("cleartext_excerpts")
+# Refused either as a protocol error (the handler never heard of it) or as a tool error;
+# what matters is that nothing was served.
+refused = "error" in replies[1] or replies[1].get("result", {}).get("isError") is True
+check(refused, "calling the payload tool without the flag is refused, not served")
+
+replies, err = call_tool("cleartext_excerpts", extra_args=["--allow-payload"])
+names = [tool["name"] for tool in replies[0]["result"]["tools"]]
+check(names[-1:] == ["cleartext_excerpts"] and len(names) == 7,
+      "with --allow-payload the payload tool is advertised, last")
+check("--allow-payload is ON" in err,
+      "turning the payload tool on is announced on stderr every time")
+
+# ---------------------------------------------------------- the doctor keeps stdout clean
+
+# beholder_doctor is the one tool that spawns a process. Whatever launchctl prints must be
+# parsed, never passed through: a byte of it on stdout would corrupt the stream.
+replies, _ = call_tool("beholder_doctor", {"log_lines": 5})
+check(len(replies) == 2, "the doctor adds nothing to stdout beyond its own reply")
+doctor = replies[1]["result"]
+check(doctor.get("isError") is False, "the doctor answers even with no daemon to find")
+check("verdict" in doctor["content"][0]["text"],
+      "the doctor's answer names a verdict")
 
 # ------------------------------------------------------------- malformed input recovers
 

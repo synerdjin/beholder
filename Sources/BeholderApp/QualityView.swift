@@ -17,6 +17,10 @@ struct QualityView: View {
     let history: [FlowClient.ThroughputSample]
     let model: QualityModel
     let waitingState: FlowClient.State
+    /// Returns to the Overview. The detail here is a level below the plain-language screen,
+    /// and someone who followed the Overview's link should not have to find their way back
+    /// through a row of tab names.
+    var backToOverview: (() -> Void)? = nil
 
     enum Half: String, CaseIterable, Identifiable {
         case live = "Live"
@@ -28,12 +32,28 @@ struct QualityView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Picker("Half", selection: $half) {
-                ForEach(Half.allCases) { Text($0.rawValue).tag($0) }
+            HStack {
+                if let backToOverview {
+                    Button(action: backToOverview) {
+                        Label("Overview", systemImage: "chevron.left")
+                    }
+                    .buttonStyle(.borderless)
+                    .keyboardShortcut("[", modifiers: .command)
+                    .help("Back to the Overview (⌘[)")
+                }
+                Spacer()
+                Picker("Half", selection: $half) {
+                    ForEach(Half.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                Spacer()
+                if backToOverview != nil {
+                    // Balances the button so the picker stays centred.
+                    Label("Overview", systemImage: "chevron.left").hidden()
+                }
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .fixedSize()
             .padding(.horizontal, 12)
             .padding(.top, 8)
             .padding(.bottom, 6)
@@ -102,12 +122,20 @@ private struct MeasurementOffView: View {
 private struct QualityHeadline: View {
     let statistics: WireStatistics
     let history: [FlowClient.ThroughputSample]
+    @AppStorage(showTechnicalDetailKey) private var showTechnicalDetail = false
+
+    /// The ratings come from the same assessment the Overview shows, so the two screens
+    /// cannot rate one figure differently.
+    private func rating(_ area: HealthFinding.Area) -> HealthRating? {
+        HealthAssessment.make(statistics: statistics, probes: nil)
+            .findings.first { $0.area == area }?.rating
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .top, spacing: 22) {
                 QualityStat(
-                    label: "Latency floor",
+                    label: showTechnicalDetail ? "Latency floor" : "Best response",
                     value: formatMilliseconds(statistics.minRttMs),
                     detail: "lowest round trip",
                     help: "The lowest round trip seen. The closest a passive observer "
@@ -116,17 +144,19 @@ private struct QualityHeadline: View {
                         + "answering, and this does not."
                 )
                 QualityStat(
-                    label: "Typical",
+                    label: showTechnicalDetail ? "Typical" : "Typical response",
                     value: formatMilliseconds(statistics.medianRttMs),
                     detail: "median round trip",
+                    rating: rating(.responseTime),
                     help: "The median smoothed round trip across every connection that "
                         + "yielded a sample. How far this sits above the floor is "
                         + "queueing, not distance."
                 )
                 QualityStat(
-                    label: "Resent out",
+                    label: showTechnicalDetail ? "Resent out" : "Sent again",
                     value: percentage(statistics.retransmitRateOut),
                     detail: "of segments sent",
+                    rating: rating(.resent),
                     help: "Segments this machine had to send again, as a share of "
                         + "segments sent. Evidence of loss on the way out — or of an "
                         + "acknowledgement lost coming back, which is indistinguishable "
@@ -134,13 +164,13 @@ private struct QualityHeadline: View {
                         + "repeat, not the drop."
                 )
                 QualityStat(
-                    label: "Resent in",
+                    label: showTechnicalDetail ? "Resent in" : "Received again",
                     value: percentage(statistics.retransmitRateIn),
                     detail: "of segments received",
                     help: "Segments the far end had to send again — loss on the way in."
                 )
                 QualityStat(
-                    label: "Coverage",
+                    label: showTechnicalDetail ? "Coverage" : "Traffic measured",
                     value: percentage(statistics.measuredByteShare),
                     detail: "of bytes measurable",
                     help: "The share of bytes moving on connections a round trip could "
@@ -174,6 +204,9 @@ private struct QualityStat: View {
     let label: String
     let value: String
     let detail: String
+    /// Nil for figures that have no scale — the floor and coverage are context for the
+    /// others rather than verdicts in themselves.
+    var rating: HealthRating? = nil
     let help: String
 
     var body: some View {
@@ -187,6 +220,9 @@ private struct QualityStat: View {
             Text(detail)
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
+            if let rating {
+                RatingBadge(rating: rating).padding(.top, 2)
+            }
         }
         .help(help)
     }
@@ -204,7 +240,11 @@ private struct ConnectionOutcomes: View {
                     .foregroundStyle(.secondary)
 
                 if let timeouts = statistics.connectionTimeouts, timeouts > 0 {
-                    Text("· \(timeouts) unanswered")
+                    let local = statistics.localConnectionTimeouts ?? 0
+                    Text(
+                        "· \(timeouts) unanswered"
+                            + (local > 0 ? " (\(local) to devices on the local network)" : "")
+                    )
                         .font(.caption)
                         .foregroundStyle(.orange)
                         .help(
@@ -348,6 +388,7 @@ private struct QualityRow: View {
                 Text(formatMilliseconds(smoothed))
                     .font(.system(.body, design: .monospaced))
                     .monospacedDigit()
+                    .foregroundStyle(tint(flow.responseTimeRating))
                 HStack(spacing: 3) {
                     if let floor = flow.rttMinMs {
                         Text("min \(formatMilliseconds(floor))")
@@ -380,11 +421,14 @@ private struct QualityRow: View {
     @ViewBuilder private var jitter: some View {
         Group {
             if let variation = flow.rttVarMs {
-                Text(formatMilliseconds(variation)).monospacedDigit()
+                Text(formatMilliseconds(variation))
+                    .monospacedDigit()
+                    .foregroundStyle(tint(flow.jitterRating))
             } else if let arrival = flow.arrivalJitterMs {
                 Text(formatMilliseconds(arrival))
                     .monospacedDigit()
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(
+                        flow.jitterRating >= .fair ? tint(flow.jitterRating) : .secondary)
                     .help(
                         "Variation in the gap between arriving packets, not round-trip "
                             + "variation — there is no round trip here to vary. Means "
@@ -407,7 +451,7 @@ private struct QualityRow: View {
                 } else {
                     Text("↑\(out) ↓\(incoming)")
                         .monospacedDigit()
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(tint(flow.resentRating))
                         .help(
                             flow.retransmitsAreProven == true
                                 ? "Proven retransmissions: this connection negotiated TCP "
@@ -426,4 +470,9 @@ private struct QualityRow: View {
         .frame(width: 90, alignment: .trailing)
     }
 
+    /// Only the ratings that call for attention get colour. Painting every healthy row
+    /// green would turn the list into a wall of colour and hide the few that matter.
+    private func tint(_ rating: HealthRating) -> Color {
+        rating >= .fair ? rating.color : .primary
+    }
 }

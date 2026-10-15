@@ -82,6 +82,12 @@ check: ## Build and test, failing on any warning
 run: build ## (root) Start capture and open the app. Ctrl-C stops both
 	./beholder
 
+# The command the Overview offers. Probing is the only thing here that sends, so it is a
+# target someone runs rather than something the app can switch on.
+.PHONY: probe
+probe: build ## (root) Start capture with probing, which tells Wi-Fi trouble from ISP trouble, and open the app
+	./beholder --probe
+
 .PHONY: serve
 serve: daemon-bin ## (root) Capture and publish for the app, drawing nothing
 	sudo $(DAEMON) --serve --loopback
@@ -241,16 +247,23 @@ mcp-add: mcp ## Print the command that registers the MCP server with Claude
 	@# thing in a Makefile that otherwise only touches this directory.
 	@echo "Register the MCP server by running:"
 	@echo
-	@echo "  claude mcp add beholder -- $(abspath $(BUILD))/BeholderMCP"
+	@echo "  claude mcp add beholder --scope user --env BEHOLDER_SOURCE_DIR=$(CURDIR) \\"
+	@echo "      -- $(abspath $(BUILD))/BeholderMCP"
 	@echo
-	@echo "Then ask: \"is Beholder recording anything?\""
+	@echo "(make mcp-install puts a copy somewhere stable, which survives make clean.)"
+	@echo "Then ask: \"is my connection OK right now?\" or \"why isn't Beholder recording?\""
 	@echo "Remove it again with: claude mcp remove beholder"
 
 .PHONY: mcp-install
-mcp-install: mcp ## (root) Install the MCP server to /usr/local/libexec
+mcp-install: ## (root) Install the MCP server to /usr/local/libexec
 	@# The install and the registration guidance live in the script, not here, so that
-	@# the wizard and reload print the same advice rather than their own copy of it.
-	sudo env BEHOLDER_CONFIG=$(CONFIG) BEHOLDER_SKIP_BUILD=1 ./Scripts/install-mcp.sh
+	@# the wizard and reload print the same advice rather than their own copy of it. The
+	@# script builds the configuration it installs, as you rather than as root.
+	@# Which build: install-mcp.sh follows the installed daemon unless told otherwise, so
+	@# CONFIG is passed only when someone set it (command line or environment) — the
+	@# Makefile's own debug default used to override that and put a debug server beside a
+	@# release daemon.
+	sudo env $(if $(filter-out file,$(origin CONFIG)),BEHOLDER_CONFIG=$(CONFIG)) ./Scripts/install-mcp.sh
 
 .PHONY: test-mcp
 test-mcp: mcp ## Check the MCP server's stdout carries nothing but protocol

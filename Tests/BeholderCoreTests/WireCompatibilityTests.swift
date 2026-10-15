@@ -99,11 +99,14 @@ struct WireCompatibilityTests {
         original.minRttMs = 22.5
         original.retransmitRateOut = 0.23
         original.retransmitRateIn = 0.24
+        original.segmentsOut = 2400
         original.unmeasurableFlowCount = 25
         original.unmeasurableBytes = 26
         original.connectionAttempts = 27
         original.connectionTimeouts = 28
         original.connectionRefusals = 29
+        original.localConnectionAttempts = 32
+        original.localConnectionTimeouts = 33
         original.discardedRttSamples = 30
         original.segmentOffloadFlowCount = 31
         original.warnings = ["a warning"]
@@ -197,6 +200,33 @@ struct WireCompatibilityTests {
 
         #expect(decodedReading.cleartextExcerpts?.isEmpty == true)
         #expect(decodedNot.cleartextExcerpts == nil)
+    }
+
+    /// `daemon` was added after the first release, so a snapshot from an older daemon has no
+    /// such key. Synthesised `Codable` would decode the optional without one, which is the
+    /// whole reason it is optional — pinned so nobody "improves" it to non-optional.
+    @Test("A snapshot with no daemon block still decodes, and one with it round-trips")
+    func daemonInfoIsAdditive() throws {
+        let old = Data(
+            #"{"version":1,"generatedAt":1,"startedAt":0,"interfaces":[],"flows":[],"statistics":{}}"#.utf8)
+        let decodedOld = try FlowSnapshot.decoder().decode(FlowSnapshot.self, from: old)
+        #expect(decodedOld.daemon == nil)
+
+        let info = DaemonInfo(
+            pid: 412, executablePath: "/usr/local/libexec/beholderd",
+            executableModified: Date(timeIntervalSince1970: 1_700_000_000),
+            flags: .init(blockRequested: true, probing: true, qualityMeasurement: true,
+                         readingCleartext: false, followingRoute: true),
+            historyStorePath: nil,
+            historyStoreError: "unable to open database file",
+            enrichment: [.init(name: "geolocation", loaded: false, path: nil)],
+            blockingActive: true, blockingEntryCount: 3)
+        let snapshot = FlowSnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1), startedAt: Date(timeIntervalSince1970: 0),
+            interfaces: [], flows: [], statistics: WireStatistics(), daemon: info)
+        let decoded = try FlowSnapshot.decoder()
+            .decode(FlowSnapshot.self, from: try FlowSnapshot.encoder().encode(snapshot))
+        #expect(decoded.daemon == info)
     }
 
     @Test("A flow read as cleartext reports itself as unprotected; an encrypted one does not")
