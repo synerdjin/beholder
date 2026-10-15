@@ -403,6 +403,23 @@ struct FlowStoreSchemaTests {
         defer { reader.close() }
         #expect(try reader.userVersion() == 0)
     }
+
+    /// Reading skips migration, and used to skip the version check with it — so a viewer
+    /// opened a database from a newer build and answered from it as if it were this one,
+    /// which mostly works and fails as quietly absent data. CLAUDE.md says such a database is
+    /// refused; this makes that true for readers as well as for the daemon.
+    @Test("A read-only open refuses a database from a newer build")
+    func readOnlyRefusesNewerSchema() throws {
+        let temporary = TemporaryDatabase()
+        let store = try FlowStore(path: temporary.path)
+        store.close()
+
+        try temporary.stamp(version: FlowStore.schemaVersion + 5)
+
+        #expect(throws: FlowStore.StoreError.self) {
+            _ = try FlowStore(path: temporary.path, readOnly: true)
+        }
+    }
 }
 
 // MARK: - Quality history

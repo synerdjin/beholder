@@ -25,6 +25,8 @@ struct Options {
     var block = false
     var blocklistPath = BlockList.defaultPath
     var checkBlocklist = false
+    var diagnose = false
+    var diagnoseSource: String?
     var printPFAnchor = false
     var printPFConfiguration = false
     var managedBlocklistPath = ControlProtocol.managedListPath
@@ -142,6 +144,14 @@ struct Options {
           --check-blocklist
                         Parse the block list, print what it would block, and exit. Needs no
                         root and changes nothing. Exits non-zero if any line cannot be used.
+          --diagnose    Say why the daemon is or is not working: launchd job, socket, pf
+                        anchor, installed binaries and recent log output. Needs no root and
+                        changes nothing. Exits non-zero when it finds a problem. This is the
+                        one home of that judgement; `make doctor` and the MCP server's
+                        beholder_doctor both report it rather than re-deriving it.
+          --diagnose-source DIR
+                        With --diagnose, also compare the installed binaries against the
+                        newest source file under DIR.
           --control     Open the control socket so Beholder.app can change what is blocked.
                         Implied by --block. The socket is the only channel into the daemon
                         that changes anything: the publishing socket still accepts no
@@ -275,6 +285,10 @@ struct Options {
                 pending = ("--control-pin", { $0.controlPinPath = $1 })
             case "--check-blocklist":
                 options.checkBlocklist = true
+            case "--diagnose":
+                options.diagnose = true
+            case "--diagnose-source":
+                pending = ("--diagnose-source", { $0.diagnoseSource = $1 })
             case "--print-pf-anchor":
                 options.printPFAnchor = true
             case "--print-pf-conf":

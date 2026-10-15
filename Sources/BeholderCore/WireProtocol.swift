@@ -330,6 +330,12 @@ public struct WireStatistics: Codable, Sendable, Hashable {
     /// measurement nobody here made.
     public var retransmitRateOut: Double?
     public var retransmitRateIn: Double?
+    /// TCP segments sent, the denominator of `retransmitRateOut`.
+    ///
+    /// Published so a reader can tell a rate over thousands of segments from one over a
+    /// handful. Two repeats in twenty segments is 10% and means nothing; a scale that rated
+    /// it would call an idle machine broken. `HealthScale` will not rate below its minimum.
+    public var segmentsOut: UInt64?
 
     /// Conversations offering no round trip to measure, and what they moved. Mostly QUIC.
     public var unmeasurableFlowCount: Int?
@@ -342,6 +348,11 @@ public struct WireStatistics: Codable, Sendable, Hashable {
     public var connectionAttempts: Int?
     public var connectionTimeouts: Int?
     public var connectionRefusals: Int?
+    /// How many of the attempts and timeouts above went to devices on this machine's own
+    /// network (`FlowKey.remoteIsOnLocalNetwork`). A subset, not an addition: the totals
+    /// are unchanged, so an older reader still reads them correctly.
+    public var localConnectionAttempts: Int?
+    public var localConnectionTimeouts: Int?
 
     /// Round-trip samples thrown out as impossible, which is what a stepped clock looks
     /// like from here. Published so a quiet network and a corrected clock are not confused.
@@ -420,15 +431,122 @@ public struct WireStatistics: Codable, Sendable, Hashable {
         minRttMs = try optionalDouble(.minRttMs)
         retransmitRateOut = try optionalDouble(.retransmitRateOut)
         retransmitRateIn = try optionalDouble(.retransmitRateIn)
+        segmentsOut = try optionalCount(.segmentsOut)
         unmeasurableFlowCount = try optionalInt(.unmeasurableFlowCount)
         unmeasurableBytes = try optionalCount(.unmeasurableBytes)
         connectionAttempts = try optionalInt(.connectionAttempts)
         connectionTimeouts = try optionalInt(.connectionTimeouts)
         connectionRefusals = try optionalInt(.connectionRefusals)
+        localConnectionAttempts = try optionalInt(.localConnectionAttempts)
+        localConnectionTimeouts = try optionalInt(.localConnectionTimeouts)
         discardedRttSamples = try optionalCount(.discardedRttSamples)
         segmentOffloadFlowCount = try optionalInt(.segmentOffloadFlowCount)
         warnings = try strings(.warnings)
         interfaceTransitions = try strings(.interfaceTransitions)
+    }
+}
+
+/// What the daemon says about itself, so a reader can tell "capturing, but without the
+/// geolocation database" from "capturing everything" without being able to ask.
+///
+/// Optional on `FlowSnapshot` and every member of it is a plain value with no secrets:
+/// counts and booleans, never the contents of the block list. The publishing socket is
+/// strictly read-only and learns only what `lsof` would already tell a reader, and this
+/// keeps to that. Adding it is a compatible change, so `WireProtocol.version` stays put —
+/// a snapshot from an older daemon simply has no `daemon` and readers say so.
+public struct DaemonInfo: Codable, Sendable, Equatable {
+    public struct Flags: Codable, Sendable, Equatable {
+        public var blockRequested: Bool
+        public var probing: Bool
+        public var qualityMeasurement: Bool
+        public var readingCleartext: Bool
+        public var followingRoute: Bool
+
+        public init(
+            blockRequested: Bool = false, probing: Bool = false,
+            qualityMeasurement: Bool = true, readingCleartext: Bool = false,
+            followingRoute: Bool = true
+        ) {
+            self.blockRequested = blockRequested
+            self.probing = probing
+            self.qualityMeasurement = qualityMeasurement
+            self.readingCleartext = readingCleartext
+            self.followingRoute = followingRoute
+        }
+    }
+
+    /// One enrichment source: whether it loaded, and where it looked.
+    public struct Source: Codable, Sendable, Equatable {
+        public var name: String
+        public var loaded: Bool
+        public var path: String?
+
+        public init(name: String, loaded: Bool, path: String? = nil) {
+            self.name = name
+            self.loaded = loaded
+            self.path = path
+        }
+    }
+
+    public var pid: Int32
+    public var executablePath: String?
+    public var executableModified: Date?
+    public var flags: Flags
+    /// Where history is being recorded. Nil when it is not: `historyStoreError` then says
+    /// why, and when that is nil too the daemon was run without history at all.
+    public var historyStorePath: String?
+    public var historyStoreError: String?
+    public var historyStoreOpened: Bool { historyStorePath != nil }
+    public var enrichment: [Source]
+    /// Counts only. Which destinations are blocked is not published on this socket.
+    ///
+    /// No reason accompanies an inactive filter because there is no state to explain: with
+    /// `--block` the daemon either arms the filter or refuses to start.
+    public var blockingActive: Bool
+    public var blockingEntryCount: Int?
+
+    public init(
+        pid: Int32, executablePath: String? = nil, executableModified: Date? = nil,
+        flags: Flags = Flags(), historyStorePath: String? = nil,
+        historyStoreError: String? = nil,
+        enrichment: [Source] = [], blockingActive: Bool = false,
+        blockingEntryCount: Int? = nil
+    ) {
+        self.pid = pid
+        self.executablePath = executablePath
+        self.executableModified = executableModified
+        self.flags = flags
+        self.historyStorePath = historyStorePath
+        self.historyStoreError = historyStoreError
+        self.enrichment = enrichment
+        self.blockingActive = blockingActive
+        self.blockingEntryCount = blockingEntryCount
+    }
+}
+
+/// The optional databases that enrich a connection, named once.
+///
+/// The daemon reports which loaded, the diagnosis checks which are on disk, and both used to
+/// carry their own copy of this list — the shape where adding a fourth database updates one
+/// and leaves the other describing three.
+public enum EnrichmentDatabase: String, CaseIterable, Sendable {
+    case geolocation
+    case networkOperators = "network operators"
+    case trackers
+
+    public var name: String { rawValue }
+
+    public var standardPaths: [String] {
+        switch self {
+        case .geolocation: return GeoIPDatabase.standardPaths()
+        case .networkOperators: return ASNDatabase.standardPaths()
+        case .trackers: return TrackerDatabase.standardPaths()
+        }
+    }
+
+    /// The first standard path that exists, which is where a loader would look first.
+    public var installedPath: String? {
+        standardPaths.first { FileManager.default.fileExists(atPath: $0) }
     }
 }
 
@@ -450,6 +568,9 @@ public struct FlowSnapshot: Codable, Sendable {
     /// a rule of avoiding.
     public let cleartextExcerpts: [WireExcerpt]?
 
+    /// The daemon's own state. Nil from a daemon that predates it.
+    public let daemon: DaemonInfo?
+
     public init(
         version: Int = WireProtocol.version,
         generatedAt: Date,
@@ -457,9 +578,11 @@ public struct FlowSnapshot: Codable, Sendable {
         interfaces: [String],
         flows: [WireFlow],
         statistics: WireStatistics,
-        cleartextExcerpts: [WireExcerpt]? = nil
+        cleartextExcerpts: [WireExcerpt]? = nil,
+        daemon: DaemonInfo? = nil
     ) {
         self.cleartextExcerpts = cleartextExcerpts
+        self.daemon = daemon
         self.version = version
         self.generatedAt = generatedAt
         self.startedAt = startedAt

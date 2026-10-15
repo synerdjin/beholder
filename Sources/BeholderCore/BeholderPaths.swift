@@ -15,7 +15,19 @@ public enum BeholderPaths {
     /// exists: the label is chosen by `install-daemon.sh` and read back by both the app and
     /// the MCP `network_status` tool, and two of the three getting it right is the same as
     /// none of them. Renaming the job is now one edit on the Swift side.
-    public static let launchdPlist = "/Library/LaunchDaemons/com.beholder.daemon.plist"
+    public static let launchdLabel = "com.beholder.daemon"
+    public static let launchdPlist = "/Library/LaunchDaemons/\(launchdLabel).plist"
+
+    /// The status `beholderd --block` exits with when it refuses to run because the pf anchor
+    /// is not loaded. Its own number, rather than the 1 every other failure uses, so the
+    /// reason survives in launchd's `last exit code` — a fact the diagnosis can read without
+    /// root and without parsing a log line whose wording is free to change. 78 is
+    /// `EX_CONFIG`: the configuration, not the program, is what is wrong.
+    public static let blockRefusedExitCode: Int32 = 78
+
+    /// Where the install scripts put the two installable binaries.
+    public static let installedDaemon = "/usr/local/libexec/beholderd"
+    public static let installedMCP = "/usr/local/libexec/beholder-mcp"
 
     /// Whether a launchd job is installed.
     ///

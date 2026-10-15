@@ -52,7 +52,7 @@ make selftest       # timers, rendering and shutdown with no capture
 make sockets        # socket-to-process table (compare against `lsof -nP -i TCP`)
 make route          # which interface currently carries the default route
 make history        # query the history database
-make doctor         # diagnose why the app cannot see the daemon
+make doctor         # diagnose why the app cannot see the daemon (wraps beholderd --diagnose)
 ```
 
 ### Running a single test
@@ -140,9 +140,14 @@ encrypted, so the app's `Cleartext` view can display them. `PayloadExcerptStore`
 
 Three rules that are load-bearing, not stylistic:
 
-- **Payload never reaches `FlowStore`, `RunLog`, or `MCPToolbox`.** The README states this
-  plainly to the user. Do not add a persistence column, a transcript section, or an MCP
-  tool that returns bytes.
+- **Payload never reaches `FlowStore` or `RunLog`, and reaches MCP only through
+  `cleartext_excerpts`, which does not exist unless `beholder-mcp` was started with
+  `--allow-payload`.** The README states this plainly to the user. Do not add a persistence
+  column or a transcript section, and do not return payload from any other MCP tool or
+  make the tool present-but-refusing: the tool list is the control, because a tool the
+  client never sees costs it no context and cannot be called by an injected instruction.
+  Everything that tool returns goes through the Core renderers (`PayloadPreview`,
+  `HexDump`) and `clean`, never as raw bytes.
 - **`cleartextExcerpts` is `Optional` and nil ≠ empty.** Nil means nothing is reading
   payload; empty means it is reading and found nothing. The app renders four different
   screens off that distinction.
@@ -285,13 +290,29 @@ resynchronise from, so a single stray `print()` anywhere in its startup path cor
 stream permanently and surfaces only as an unexplained client-side parse error. Use stderr
 for anything human-facing. This is also why it is a separate binary from the chatty `beholderd`.
 
-**The MCP surface is five tools, and the count is a budget.** Every tool's schema sits in
+**The MCP surface is six tools, and the count is a budget.** Every tool's schema sits in
 the client's context on every turn, including conversations that have nothing to do with
 networking. `network_quality` was added as a fifth because it answers a different *kind* of
 question from the other four — keyed by time rather than by identity — and folding it into
-`network_history` would have given one tool two schemas. Three places pin the list and all
-three must move together: `MCPProtocolTests`, `Scripts/test-mcp-stdio.sh`, and the design
-note at the top of `MCPTools.swift`.
+`network_history` would have given one tool two schemas. `beholder_doctor` is the sixth for
+the same reason: it asks why the instrument is broken, not how the network was. Widen an
+existing tool before adding another. A seventh, `cleartext_excerpts`, exists only under
+`--allow-payload`. Three places pin the list and all three must move together:
+`MCPProtocolTests`, `Scripts/test-mcp-stdio.sh`, and the design note at the top of
+`MCPTools.swift`.
+
+**The MCP server spawns exactly one subprocess**, from `beholder_doctor`:
+`/bin/launchctl print system/com.beholder.daemon` (`DaemonDiagnosis.askLaunchd`) — absolute
+path, fixed argv, no shell, two-second limit, output only parsed. Do not add a second, and
+do not pass anything a caller supplied into it.
+
+**`DaemonDiagnosis` is the one home of "why is the daemon not working".** `beholderd
+--diagnose` prints it, `Scripts/doctor.sh` delegates to that and keeps only what needs root
+or opens a window, and `beholder_doctor` renders the same `Report`. A fourth copy of the
+crash-loop-versus-pending-approval judgement in shell, Swift or prose will drift from the
+others. `FlowSnapshot.daemon` (`DaemonInfo`) is the daemon's report on itself — counts and
+booleans only; never publish block-list contents there, since that socket stays read-only
+and reveals nothing `lsof` would not.
 
 **`FlowStore` migrations are versioned and append-only.** `migrate()` runs an ordered list
 keyed on `PRAGMA user_version`; a database from a newer build is refused rather than read,
@@ -321,6 +342,12 @@ capture cannot answer at all — whether the link worked while idle, and whether
 the local Wi-Fi or the uplink — and its results are excluded from Beholder's own
 measurements *by process*, never by a capture filter, since a filter on those addresses
 would also hide genuine traffic to them.
+
+**Thresholds live only in `HealthScale`.** The Overview, the Quality tab's colours,
+`ProbeSummary.reading` and the menu bar all rate against it; a second copy of "what counts
+as slow" anywhere else will drift. `unmeasured` is never drawn as good, and the Overview's
+headline names the worst area rather than computing a score — see the README's "Reading the
+Overview".
 
 **There is no `query_sql` MCP tool and there should never be one.** Read-only SQLite still
 reaches other files via `ATTACH`, still returns unbounded results, and turns a fixed set of

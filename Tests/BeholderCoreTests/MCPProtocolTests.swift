@@ -185,7 +185,7 @@ struct MCPProtocolTests {
 
     // MARK: - The real toolbox
 
-    @Test("The tool surface is exactly the five documented tools")
+    @Test("The tool surface is exactly the six documented tools")
     func toolNamesArePinned() {
         // Pinned deliberately. A rename silently breaks every saved conversation and every
         // habit a user has built, so it should take a failing test to do it.
@@ -193,18 +193,27 @@ struct MCPProtocolTests {
         // The count is pinned as much as the names. Every tool's schema sits in the
         // client's context on every turn of every conversation, so growth here is a cost
         // paid by people who never ask about networking at all — see the note at the top
-        // of MCPTools for why the fifth was judged to earn its place.
+        // of MCPTools for why the fifth and sixth were judged to earn their places.
         #expect(
             MCPToolbox.definitions.map(\.name) == [
                 "network_history", "endpoint_lookup", "live_connections", "beholder_status",
-                "network_quality",
+                "beholder_doctor", "network_quality",
             ]
         )
     }
 
+    @Test("The payload tool exists only when it was asked for")
+    func payloadToolIsOptIn() {
+        #expect(!MCPToolbox.definitions(allowPayload: false).map(\.name).contains("cleartext_excerpts"))
+        #expect(MCPToolbox.definitions(allowPayload: true).map(\.name).last == "cleartext_excerpts")
+        #expect(
+            MCPToolbox.definitions(allowPayload: true).count
+                == MCPToolbox.definitions(allowPayload: false).count + 1)
+    }
+
     @Test("Every schema is a well-formed object schema")
     func schemasAreWellFormed() throws {
-        for definition in MCPToolbox.definitions {
+        for definition in MCPToolbox.definitions(allowPayload: true) {
             let schema = definition.inputSchema
             #expect(schema["type"]?.stringValue == "object", "\(definition.name)")
             #expect(schema["additionalProperties"]?.boolValue == false, "\(definition.name)")

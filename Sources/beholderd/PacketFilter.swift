@@ -99,6 +99,12 @@ final class PacketFilter {
     /// half without re-reading the hand-edited half and silently picking up an edit that was
     /// half-written at the moment the button was pressed.
     private var lists = EnforcedBlockList(fixed: BlockList(entries: []), managed: BlockList(entries: []))
+    {
+        // Kept beside the lists so the per-second snapshot can report a count without
+        // building, deduplicating and sorting every entry only to throw them away.
+        didSet { blockedDestinationCount = lists.tableEntries.count }
+    }
+    private var blockedDestinationCount = 0
     private var hangupSource: DispatchSourceSignal?
 
     /// Set once teardown has run, so a second signal cannot flush a table twice or release
@@ -236,6 +242,11 @@ final class PacketFilter {
     }
 
     // MARK: - The control surface
+
+    /// How many destinations are blocked. Cheap enough to ask once a second.
+    func blockedCount() -> Int {
+        queue.sync { blockedDestinationCount }
+    }
 
     /// What is blocked right now, and by which file.
     func state() -> ControlState {

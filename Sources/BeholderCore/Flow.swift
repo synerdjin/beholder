@@ -25,6 +25,36 @@ public enum ConnectionDirection: Sendable, Hashable {
 /// destination, and without deciding which end is "us" the table would hold two
 /// half-conversations per connection and be unable to say whether traffic went up or
 /// down — the first thing anyone looks at.
+extension FlowKey {
+    /// Whether the far end is a device on this machine's own network rather than somewhere
+    /// on the internet.
+    ///
+    /// Exists because a connection to a sleeping iPhone and a connection to a website that
+    /// will not answer look identical to TCP, and only one of them is the network failing.
+    /// macOS's `usbmuxd` knocks on port 62078 of every iPhone or iPad it has ever synced
+    /// over Wi-Fi, every few seconds, whether or not the device is awake — and counting those
+    /// put "sites may fail to open" on a screen whose router and internet probes were both
+    /// clean.
+    ///
+    /// The IPv6 case is the one that needs care. A home network's devices usually hold
+    /// global addresses, so "private" alone misses them; they share this machine's /64
+    /// instead, which is what a single LAN segment is under SLAAC. `100.64/10` is left out
+    /// deliberately even though `isPrivate` includes it: that is carrier NAT and VPN
+    /// resolvers, reached through a tunnel, and a failure there *is* the path failing.
+    public var remoteIsOnLocalNetwork: Bool {
+        if remote.isLinkLocal { return true }
+        switch remote.family {
+        case .v4:
+            let sharedAddressSpace = UInt32(truncatingIfNeeded: remote.low) >> 22 == 0x191
+            return remote.isPrivate && !sharedAddressSpace
+        case .v6:
+            if remote.isPrivate { return true }
+            return local.family == .v6 && !local.isLinkLocal
+                && local.masked(prefixLength: 64) == remote.masked(prefixLength: 64)
+        }
+    }
+}
+
 public struct FlowKey: Hashable, Sendable {
     public let transport: TransportProtocol
     public let local: IPAddress

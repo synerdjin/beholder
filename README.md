@@ -393,9 +393,16 @@ What bounds it instead:
 - **Bounded.** 4 KB per direction, 64 connections at a time, oldest released first. Enough
   for a request line, its headers and the start of a response — the part that says what a
   connection is for.
-- **Never over MCP.** The MCP server gained the `security` and `protocol` fields on
-  `live_connections` and nothing else. No tool returns payload, and none should: it would
-  mean sending exactly the credentials above to an assistant on any turn.
+- **Not over MCP, unless you turn it on separately.** By default no MCP tool returns
+  payload, and the tool that can does not exist: it is absent from the tool list rather than
+  present and refusing, so the assistant cannot see it and an injected instruction cannot
+  call it. Registering the server with `--allow-payload` adds `cleartext_excerpts`, which
+  returns the opening bytes of unencrypted connections as text — exactly the credentials
+  above, to an assistant, on whatever turn it asks. That is a decision about your data and
+  is a separate flag from `--read-cleartext` on purpose: reading payload in the daemon and
+  handing it to an assistant are two different things to agree to. It announces itself on
+  stderr every time the server starts, never touches the database or the transcript, and
+  renders what it returns through the same bounded readers the Cleartext view uses.
 
 What the reader shows depends on what the bytes turn out to be. HTTP is displayed as its
 start line, its header block and its body, and DNS — which on a Mac means mostly mDNS — as its records:
@@ -617,12 +624,38 @@ make mcp
 make mcp-add     # prints the claude mcp add line; run it yourself
 ```
 
+Register it at user scope (`make mcp-install` prints exactly that), so it works from
+whichever directory you happen to ask from. A registration without `--scope user` is keyed
+to the directory it was added from, and a question about your connection is never asked
+from the right one. Passing `--env BEHOLDER_SOURCE_DIR=<this checkout>` lets the doctor say
+whether the installed daemon is older than the code.
+
 It is off until you register it, and `claude mcp remove beholder` ends it.
 
-Five tools: recorded history, one endpoint's whole story, a live snapshot, a health check,
-and network quality. Five rather than a dozen on purpose — every tool's description sits in
-the assistant's context on every turn of every conversation, including the ones that have
-nothing to do with networking, so the set is a budget rather than a catalogue.
+Six tools: recorded history, one endpoint's whole story, a live snapshot, a health check,
+a doctor, and network quality. Six rather than a dozen on purpose — every tool's description
+sits in the assistant's context on every turn of every conversation, including the ones that
+have nothing to do with networking, so the set is a budget rather than a catalogue.
+
+`beholder_doctor` is the sixth, and the reason is the same: it answers yet another kind of
+question. The others ask about the network; this one asks why the instrument is broken, and
+is keyed by neither identity nor time but by component. It reports whether the daemon is
+installed, running, crash-looping or waiting for macOS approval, whether its socket answers,
+whether the pf anchor is still wired into `/etc/pf.conf`, whether the installed binaries are
+older than the source, which optional databases are missing, and the tail of the daemon's
+logs — each finding with the command that fixes it, none of them run for you. The judgement
+is the same one `make doctor` makes, because both call `beholderd --diagnose`; a shell
+script and a Swift tool each carrying their own copy of "crash loop or pending approval"
+was how the two would have come to disagree.
+
+When the question is about now, `network_quality` also returns the live assessment the
+Overview shows — same code, same bands — and `live_connections` can return every counter the
+daemon publishes (`detail: "full"` adds each connection's round trip, retransmissions,
+jitter and hop count), so "is my connection OK right now?" has an answer that does not
+depend on the history database existing. The daemon now reports on itself, too: its flags,
+whether the history store opened, and which enrichment databases loaded, so a country
+column that is empty because the database is missing says so instead of looking like a
+quiet network.
 
 It was four for a long time. `network_quality` was added rather than folded into one of the
 others because it answers a different *kind* of question: the other four are all forms of
@@ -640,8 +673,13 @@ unreliable when the answer wanted was one number, so the grouping happens in SQL
 the summary is what travels.
 
 It is read-only by construction: the database is opened `SQLITE_OPEN_READONLY`, no tool
-takes a path or a SQL string, not one byte is written to the daemon's socket, and no
-subprocess is ever spawned. There is no SQL passthrough tool and there will not be one —
+takes a path or a SQL string, and not one byte is written to the daemon's socket. Exactly one
+subprocess is ever spawned, only by `beholder_doctor`: `/bin/launchctl print
+system/com.beholder.daemon`, by absolute path, with a fixed argument list, no shell, a
+two-second limit, and its output only parsed. It is the one way to tell a crash loop from a
+daemon macOS is holding back, which is the first thing a broken install raises. A database
+written by a newer build is refused here as it is everywhere else, rather than read as if it
+were this one. There is no SQL passthrough tool and there will not be one —
 read-only SQL still reaches other files through `ATTACH`, still returns unbounded results,
 and turns a fixed set of questions into an injection surface fed by generated text.
 
@@ -745,6 +783,64 @@ filter on those addresses would also hide the genuine DNS this machine sends to 
 sudo ./.build/debug/beholderd --serve --probe     # gateway plus the built-in anchors
 sudo ./.build/debug/beholderd --serve --probe --probe-target 192.0.2.1 --probe-interval 60
 ```
+
+`make probe` does the same through the launcher and opens the app. It is the command the
+Overview offers when it has no probe results to show.
+
+### Reading the Overview
+
+The app opens on an **Overview** written for someone who does not know what a round trip is:
+one sentence saying whether the network is all right and, if not, where the trouble is, then
+one row per area with a three-band scale and the measurement behind it. "Show technical
+details" puts the raw figures back on every row and the old labels back on the Quality tab.
+
+It is **not a score**. A single number throws away the caveats that make it mean anything,
+which is why `Reliability.verdict` refuses one for the long view, and the same reasoning holds
+here. The headline names the worst *area*; when several are equally bad it names the one that
+locates the problem best, so "your router" wins over "things are slow". Every row says which
+window it covers, and when the latency figures cover less than 75% of the bytes moved, the
+headline says so directly beneath it.
+
+The thresholds are fixed rather than learnt from this machine's history. A network that has
+always been bad should not be graded against itself into looking normal, and "struggling"
+should mean the same on the first run as on the hundredth. They are rules of thumb, live in
+one place (`HealthScale`), and every boundary is pinned by a test:
+
+| Area | Good | Okay | Struggling | Not rated until |
+|---|---|---|---|---|
+| Typical response time | ≤ 50 ms | ≤ 150 ms | above | a connection has been timed |
+| Data sent again | ≤ 1% | ≤ 3% | above | 100 segments sent |
+| Connections that never answered | ≤ 2% | ≤ 10% | above | 10 connections opened |
+| Your Wi-Fi and router (probe) | ≤ 2% unanswered and ≤ 25 ms | — | otherwise | a probe has run |
+| The internet beyond (probe) | ≤ 2% unanswered and ≤ 150 ms | — | otherwise | a probe has run |
+| Jitter, per connection | ≤ 10 ms | ≤ 30 ms | above | measured |
+
+Why these:
+
+- **50 / 150 ms.** Under 50 ms nothing interactive feels slow. Past 150 ms calls start to talk
+  over each other and pages visibly hesitate; ITU-T G.114 puts its limit for one-way voice
+  delay in the same place.
+- **1% / 3% resent.** A healthy path repeats well under 1%. TCP's throughput falls away fast
+  beyond a few percent, which is what a person experiences as a download that stalls. This row
+  counts *repeats*, and says so: a passive observer sees the second copy, not the drop, so it
+  is never called packet loss.
+- **2% / 10% unanswered.** The odd timeout is a dead host somewhere; one in ten is the path
+  failing. Refusals are not counted — the far end declining is not the network's doing.
+  Neither are devices on your own network (private IPv4, link-local, or the IPv6 /64 the Mac
+  is on): macOS's `usbmuxd` knocks on port 62078 of every iPhone it has synced over Wi-Fi,
+  every few seconds, asleep or not, and on one evening that alone produced 29 "failures" with
+  a clean router and a clean uplink. They are shown beside the row, not rated, and not
+  written to the history's failure windows.
+- **25 ms to the router.** The first hop is inside the house and has no excuse for more. The
+  probe limits are the same ones `ProbeSummary.reading` and the MCP tool use; there is one copy.
+- **30 ms of jitter** is about what a real-time audio buffer absorbs before it is audible.
+
+Below the minimums a figure is shown as **Not measured**, which is grey and sorts below good,
+never green. Two repeats in twenty segments is 10% and means nothing, and "nobody looked"
+drawn as good is the reassuring kind of wrong this project avoids everywhere else.
+
+The menu-bar icon gains a symbol only when something is okay-but-slow or struggling; a
+healthy or unrated network leaves it as it was.
 
 ## Blocking
 
@@ -1018,7 +1114,12 @@ launchctl print system/com.beholder.daemon | grep "last terminating signal"
 ```
 
 If that field is set, the job has been running and dying, and no amount of approving it
-in System Settings will help. `make doctor` reads it and says which case you are in.
+in System Settings will help. `make doctor` reads it and says which case you are in — as
+does `beholderd --diagnose`, which it now delegates to, and the assistant's
+`beholder_doctor`. A related cause worth knowing: an installed `--block` daemon whose pf
+anchor was unloaded exits cleanly at startup on purpose, so launchd records no signal and
+restarts it forever; the doctor reads the job's arguments from its plist alongside
+`/etc/pf.conf` and names that case.
 
 This distinction is in the README because getting it wrong cost real time: a crash loop
 was read as approval-pending and left restarting four thousand times.

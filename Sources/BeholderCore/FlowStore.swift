@@ -94,6 +94,21 @@ public final class FlowStore {
         }
         self.handle = database
 
+        // A database from a newer Beholder may carry tables and columns this build knows
+        // nothing about. Reading it would mostly work, which is exactly the problem: the
+        // failure would surface as quietly absent data rather than as an error. Refuse it,
+        // for the same reason WireProtocol.version refuses a snapshot it cannot decode.
+        //
+        // Checked here, before the read-only branch, so a viewer — which skips migration —
+        // is refused by the same line as the daemon, and a writer is refused before it has
+        // switched the file to WAL.
+        let found = try userVersion()
+        guard found <= Self.schemaVersion else {
+            sqlite3_close(database)
+            self.handle = nil
+            throw StoreError.schemaTooNew(found: found, supported: Self.schemaVersion)
+        }
+
         guard !readOnly else { return }
 
         // The file lists everywhere this machine has been, so it gets the same treatment
@@ -260,15 +275,8 @@ public final class FlowStore {
         try execute("PRAGMA journal_mode = WAL;")
         try execute("PRAGMA synchronous = NORMAL;")
 
+        // Too new was already refused in init, before anything was changed.
         let current = try userVersion()
-
-        // A database from a newer Beholder may carry tables and columns this build knows
-        // nothing about. Reading it would mostly work, which is exactly the problem: the
-        // failure would surface as quietly absent data rather than as an error. Refuse it,
-        // for the same reason WireProtocol.version refuses a snapshot it cannot decode.
-        guard current <= Self.schemaVersion else {
-            throw StoreError.schemaTooNew(found: current, supported: Self.schemaVersion)
-        }
 
         for step in Self.migrations where step.version > current {
             try execute("BEGIN IMMEDIATE;")

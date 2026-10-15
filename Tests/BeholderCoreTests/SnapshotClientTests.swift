@@ -7,7 +7,7 @@ import Testing
 /// A stand-in for the capture daemon: binds a real Unix socket, accepts one client, and
 /// behaves as told. A real socket rather than a fake, because everything worth testing here
 /// — the receive timeout, the framing, telling ENOENT from EACCES — is in the syscalls.
-private final class FakeDaemon: @unchecked Sendable {
+final class FakeDaemon: @unchecked Sendable {
     enum Behaviour {
         /// Write these bytes and keep the connection open.
         case send(Data)
@@ -48,7 +48,10 @@ private final class FakeDaemon: @unchecked Sendable {
         }
 
         let listenerCopy = listener
-        DispatchQueue.global().async { [weak self] in
+        // A thread of its own rather than the shared dispatch pool: with hundreds of tests
+        // running at once the pool can take longer than the client's deadline to schedule an
+        // accept(), which reads as a daemon that never answered.
+        Thread.detachNewThread { [weak self] in
             let client = Darwin.accept(listenerCopy, nil, nil)
             guard client >= 0 else { return }
             switch behaviour {
@@ -77,6 +80,11 @@ private final class FakeDaemon: @unchecked Sendable {
         lock.lock()
         if accepted >= 0 { close(accepted) }
         lock.unlock()
+        // A thread parked in accept() is not woken by closing the listening socket on
+        // Darwin, so a peer nobody connected to would leak its thread for the rest of the
+        // run. Connecting to ourselves hands it a client to return with; it is a no-op if
+        // the accept already happened.
+        if case .success(let wake) = UnixSocket.connect(to: path) { close(wake) }
         if listener >= 0 { close(listener) }
         try? FileManager.default.removeItem(atPath: directory)
     }

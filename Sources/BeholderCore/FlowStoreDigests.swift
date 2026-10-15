@@ -71,6 +71,16 @@ public struct ProxyCandidate: Sendable, Equatable {
     public let processPath: String
     public let flowCount: Int
     public let distinctRemoteHosts: Int
+
+    /// Share of the window's eligible connections this process owns.
+    public func share(of total: Int) -> Double {
+        total > 0 ? Double(flowCount) / Double(total) : 0
+    }
+
+    public func isLikelyProxy(total: Int) -> Bool {
+        ProxyDetection.isLikelyProxy(
+            path: processPath, share: share(of: total), distinctHosts: distinctRemoteHosts)
+    }
 }
 
 public enum HistoryOrder: String, Sendable {
@@ -453,15 +463,17 @@ extension FlowStore {
     /// a fresh guess, so the live view and the historical view agree about what counts.
     public func proxyCaveat(since: Date, until: Date = Date()) throws -> String? {
         let (candidates, total) = try proxyCandidates(since: since, until: until)
-        guard total > 0 else { return nil }
+        return Self.proxyCaveat(candidates: candidates, total: total)
+    }
 
-        for candidate in candidates {
-            guard ProxyDetection.looksLikeSystemExtension(candidate.processPath) else { continue }
-            let share = Double(candidate.flowCount) / Double(total)
-            guard share >= ProxyDetection.flowShareThreshold,
-                candidate.distinctRemoteHosts >= ProxyDetection.distinctHostThreshold
-            else { continue }
-
+    /// The same sentence from candidates a caller has already fetched, so one that wants
+    /// both the sentence and the rows runs the query once.
+    public static func proxyCaveat(candidates: [ProxyCandidate], total: Int) -> String? {
+        guard let candidate = candidates.first(where: { $0.isLikelyProxy(total: total) }) else {
+            return nil
+        }
+        let share = candidate.share(of: total)
+        do {
             return """
                 \(candidate.processName) owns \(Int(share * 100))% of the connections in this \
                 window, reaching \(candidate.distinctRemoteHosts) different hosts, and runs as a \
@@ -471,7 +483,6 @@ extension FlowStore {
                 captured packets.
                 """
         }
-        return nil
     }
 
     // MARK: - Counting

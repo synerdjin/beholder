@@ -362,6 +362,70 @@ fi
 echo "PASS: quality counters are published by default (${QUALITY_DEFAULT}); --no-quality omits them."
 
 # ---------------------------------------------------------------------------
+# The daemon reports on itself, and the report follows its flags.
+#
+# Built in beholderd rather than Core, so this is the only test that can see it. What an
+# assistant is told about a running daemon — whether it measures, whether it reads payload,
+# whether history is open — comes from here; a report that stopped tracking the flags would
+# have it describe some other daemon.
+# ---------------------------------------------------------------------------
+
+read_self_report() {
+    python3 - "$1" <<'PY'
+import json, socket, sys
+
+client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+client.settimeout(10)
+client.connect(sys.argv[1])
+buffer = b""
+while b"\n" not in buffer:
+    chunk = client.recv(65536)
+    if not chunk:
+        break
+    buffer += chunk
+client.close()
+if b"\n" not in buffer:
+    sys.exit("no complete snapshot arrived")
+
+daemon = json.loads(buffer.split(b"\n")[0]).get("daemon")
+if daemon is None:
+    print("absent")
+else:
+    flags = daemon["flags"]
+    print("quality=%s cleartext=%s history=%s pid=%s" % (
+        flags["qualityMeasurement"], flags["readingCleartext"],
+        "historyStorePath" in daemon, isinstance(daemon.get("pid"), int)))
+PY
+}
+
+start_daemon
+if ! REPORT_DEFAULT="$(read_self_report "${SOCKET}")"; then
+    echo "FAIL: no snapshot to read a self-report from." >&2
+    exit 1
+fi
+require_clean_exit "reporting on itself"
+
+start_daemon "" --no-quality --read-cleartext
+if ! REPORT_FLAGGED="$(read_self_report "${SOCKET}")"; then
+    echo "FAIL: no snapshot to read a self-report from (flags given)." >&2
+    exit 1
+fi
+require_clean_exit "reporting on itself with flags"
+
+# A self-test opens no history store, so the path is absent and says so.
+if [[ "${REPORT_DEFAULT}" != "quality=True cleartext=False history=False pid=True" ]]; then
+    echo "FAIL: the default daemon's self-report is '${REPORT_DEFAULT}'." >&2
+    exit 1
+fi
+if [[ "${REPORT_FLAGGED}" != "quality=False cleartext=True history=False pid=True" ]]; then
+    echo "FAIL: the self-report did not follow --no-quality --read-cleartext:" >&2
+    echo "      got '${REPORT_FLAGGED}'." >&2
+    exit 1
+fi
+
+echo "PASS: the daemon reports on itself, and the report follows its flags."
+
+# ---------------------------------------------------------------------------
 # --probe is the one flag that makes Beholder send.
 #
 # Pinned because it is a promise to the user, not an implementation detail: the README

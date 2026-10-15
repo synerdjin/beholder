@@ -128,6 +128,21 @@ final class FlowMonitor: @unchecked Sendable {
     /// bad.
     private let isMeasuringQuality: Bool
 
+    /// Which enrichment databases actually loaded. Only the monitor knows: the optionals
+    /// are private to it and a file merely existing on disk does not mean it parsed.
+    var enrichmentSources: [DaemonInfo.Source] {
+        EnrichmentDatabase.allCases.map { database in
+            let loaded: Bool
+            switch database {
+            case .geolocation: loaded = geography != nil
+            case .networkOperators: loaded = networks != nil
+            case .trackers: loaded = trackers != nil
+            }
+            return DaemonInfo.Source(
+                name: database.name, loaded: loaded, path: database.installedPath)
+        }
+    }
+
     /// The handler to give `CaptureEngine`.
     ///
     /// Payload inspection happens *here*, synchronously, before anything is dispatched
@@ -373,7 +388,14 @@ final class FlowMonitor: @unchecked Sendable {
         // the live reading and the persisted series cannot disagree about what a timeout
         // is. What stays here is only the once-per-flow bookkeeping and the write.
         table.forEachActive { flow in
+            // Devices on the local network are not recorded. The long view's failure
+            // windows exist to say "the path out was failing then", and a sleeping iPhone
+            // that usbmuxd knocks on every few seconds would fill them with stretches of a
+            // perfectly healthy uplink. The live summary still counts them, apart, so the
+            // Overview can say they happened; the history keeps only what it is for.
+            // Rows written before this change still include them.
             guard !flow.isSelfOriginated,
+                !flow.key.remoteIsOnLocalNetwork,
                 flow.connectionTimedOut(at: now),
                 !reportedTimeouts.contains(flow.key)
             else { return }
@@ -650,7 +672,8 @@ final class FlowMonitor: @unchecked Sendable {
         interfaces: [String],
         packetsCaptured: UInt64,
         packetsDropped: UInt64,
-        transitions: [String]
+        transitions: [String],
+        daemon: DaemonInfo? = nil
     ) -> FlowSnapshot {
         let current = summary()
 
@@ -685,9 +708,12 @@ final class FlowMonitor: @unchecked Sendable {
             statistics.minRttMs = quality.minimumRTT.map { $0 * 1000 }
             statistics.retransmitRateOut = quality.retransmitRateOut
             statistics.retransmitRateIn = quality.retransmitRateIn
+            statistics.segmentsOut = quality.segmentsOut
             statistics.connectionAttempts = quality.connectionAttempts
             statistics.connectionTimeouts = quality.connectionTimeouts
             statistics.connectionRefusals = quality.connectionRefusals
+            statistics.localConnectionAttempts = quality.localConnectionAttempts
+            statistics.localConnectionTimeouts = quality.localConnectionTimeouts
             statistics.discardedRttSamples = quality.discardedSamples
             statistics.segmentOffloadFlowCount = quality.segmentOffloadFlowCount
 
@@ -746,7 +772,8 @@ final class FlowMonitor: @unchecked Sendable {
             interfaces: interfaces,
             flows: current.flows.map { $0.wireRepresentation(measuringQuality: isMeasuringQuality) },
             statistics: statistics,
-            cleartextExcerpts: payload.excerpts
+            cleartextExcerpts: payload.excerpts,
+            daemon: daemon
         )
     }
 

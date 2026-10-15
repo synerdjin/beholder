@@ -581,16 +581,20 @@ extension FlowStore {
         return probes.count
     }
 
-    public func probes(since: Date, until: Date) throws -> [ProbeResult] {
+    /// Probes in a window, oldest first — or, with `newest`, only that many and newest first,
+    /// so a caller wanting the last few does not decode a week of rows to keep sixty.
+    public func probes(since: Date, until: Date, newest: Int? = nil) throws -> [ProbeResult] {
         var results: [ProbeResult] = []
+        let order = newest == nil ? "ORDER BY at ASC" : "ORDER BY at DESC LIMIT ?"
         try withStatement(
             """
             SELECT at, interface, target, kind, rtt_ms FROM quality_probes
-            WHERE at >= ? AND at <= ? ORDER BY at ASC;
+            WHERE at >= ? AND at <= ? \(order);
             """
         ) { statement in
             sqlite3_bind_double(statement, 1, since.timeIntervalSince1970)
             sqlite3_bind_double(statement, 2, until.timeIntervalSince1970)
+            if let newest { sqlite3_bind_int64(statement, 3, Int64(newest)) }
             while sqlite3_step(statement) == SQLITE_ROW {
                 results.append(
                     ProbeResult(
@@ -637,11 +641,24 @@ public struct ProbeSummary: Sendable {
     public let anchors: (min: Double?, median: Double?, loss: Double)?
     public let samples: Int
 
+    /// Whether the first hop is slow or lossy, against the limits in `HealthScale`. Nil
+    /// when no gateway probe ran. The limits live there rather than here so the Overview's
+    /// rating and this sentence cannot disagree about the same numbers.
+    public var gatewayIsBad: Bool? {
+        guard let gateway else { return nil }
+        return gateway.loss > HealthScale.gatewayMaximumLoss
+            || (gateway.median ?? 0) > HealthScale.gatewayMaximumMedianMs
+    }
+
+    public var anchorsAreBad: Bool? {
+        guard let anchors else { return nil }
+        return anchors.loss > HealthScale.anchorMaximumLoss
+            || (anchors.median ?? 0) > HealthScale.anchorMaximumMedianMs
+    }
+
     /// Where the trouble is, when the two halves disagree enough to say.
     public var reading: String? {
-        guard let gateway, let anchors else { return nil }
-        let gatewayBad = gateway.loss > 0.02 || (gateway.median ?? 0) > 25
-        let anchorsBad = anchors.loss > 0.02 || (anchors.median ?? 0) > 150
+        guard let gatewayBad = gatewayIsBad, let anchorsBad = anchorsAreBad else { return nil }
 
         switch (gatewayBad, anchorsBad) {
         case (true, _):

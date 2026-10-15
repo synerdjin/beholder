@@ -98,14 +98,11 @@ public enum ProxyDetection {
             // this misses — and a userspace proxy is one the user configured and knows
             // about, whereas a system extension quietly rewriting attribution is exactly
             // the case worth flagging.
-            guard looksLikeSystemExtension(owner.path) else { return nil }
-
             let hosts = Set(ownedFlows.map(\.key.remote))
             let share = Double(ownedFlows.count) / Double(attributed.count)
 
-            guard share >= flowShareThreshold, hosts.count >= distinctHostThreshold else {
-                return nil
-            }
+            guard isLikelyProxy(path: owner.path, share: share, distinctHosts: hosts.count)
+            else { return nil }
             return Finding(
                 owner: owner,
                 flowCount: ownedFlows.count,
@@ -121,6 +118,15 @@ public enum ProxyDetection {
     /// Whether a path belongs to a system-level component rather than a user application.
     /// A macOS transparent proxy has to be one of these — `NETransparentProxyProvider`
     /// runs in a system extension, and the older approach used a privileged helper.
+    /// The whole test, in one place: a system extension or privileged helper owning a large
+    /// share of the connections and reaching many hosts. The live detector, the historical
+    /// caveat and the MCP's structured candidates all ask exactly this, so a threshold change
+    /// moves all three at once rather than leaving one of them describing a different proxy.
+    public static func isLikelyProxy(path: String, share: Double, distinctHosts: Int) -> Bool {
+        looksLikeSystemExtension(path) && share >= flowShareThreshold
+            && distinctHosts >= distinctHostThreshold
+    }
+
     static func looksLikeSystemExtension(_ path: String) -> Bool {
         path.contains(".systemextension/")
             || path.hasPrefix("/Library/SystemExtensions/")

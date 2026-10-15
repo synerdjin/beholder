@@ -6,6 +6,7 @@ import SwiftUI
 @main
 struct BeholderApp: App {
     @State private var client = FlowClient()
+    @State private var health = HealthModel()
 
     init() {
         // The app writes to a socket now, and writing to one whose peer has closed raises
@@ -23,16 +24,19 @@ struct BeholderApp: App {
 
     var body: some Scene {
         Window("Beholder", id: "main") {
-            MainView(client: client)
+            MainView(client: client, health: health)
                 .frame(minWidth: 760, minHeight: 460)
-                .task { client.start() }
+                .task {
+                    client.start()
+                    health.start()
+                }
         }
         .defaultSize(width: 980, height: 640)
 
         MenuBarExtra {
-            MenuBarContent(client: client)
+            MenuBarContent(client: client, health: health)
         } label: {
-            MenuBarLabel(client: client)
+            MenuBarLabel(client: client, health: health)
         }
     }
 }
@@ -41,6 +45,7 @@ struct BeholderApp: App {
 
 private struct MenuBarLabel: View {
     let client: FlowClient
+    let health: HealthModel
 
     var body: some View {
         // The count of connections this machine has opened. Byte rates were harder to
@@ -49,7 +54,14 @@ private struct MenuBarLabel: View {
         // on its own. The rates are still a click away in the menu.
         HStack(spacing: 4) {
             Image(systemName: "eye")
+            // The Overview's verdict, as one glyph. Shown only when there is something to
+            // say: an unrated network gets no symbol rather than a reassuring one.
             if let statistics = client.snapshot?.statistics {
+                let overall = HealthAssessment.make(statistics: statistics, probes: health.probes)
+                    .overall
+                if overall == .fair || overall == .poor {
+                    Image(systemName: overall.symbol)
+                }
                 Text("↗\(String(statistics.outgoingCount))")
                     .font(.system(size: 11, design: .monospaced))
                     .monospacedDigit()
@@ -91,10 +103,16 @@ private struct MenuBarLabel: View {
 
 private struct MenuBarContent: View {
     let client: FlowClient
+    let health: HealthModel
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         if let snapshot = client.snapshot {
+            Text(
+                HealthAssessment.make(statistics: snapshot.statistics, probes: health.probes)
+                    .headline
+            )
+            Divider()
             Text(
                 "\(pluralised(snapshot.statistics.outgoingCount, "outgoing connection"))"
                     + (snapshot.statistics.incomingCount > 0
@@ -154,6 +172,7 @@ private struct MenuBarContent: View {
 // MARK: - Main window
 
 private enum Presentation: String, CaseIterable, Identifiable {
+    case overview = "Overview"
     case connections = "Connections"
     case cleartext = "Cleartext"
     case map = "Map"
@@ -164,6 +183,7 @@ private enum Presentation: String, CaseIterable, Identifiable {
 
     var symbol: String {
         switch self {
+        case .overview: return "gauge.with.needle"
         case .connections: return "list.bullet"
         case .cleartext: return "lock.open"
         case .map: return "globe"
@@ -176,7 +196,8 @@ private enum Presentation: String, CaseIterable, Identifiable {
 
 private struct MainView: View {
     let client: FlowClient
-    @State private var presentation: Presentation = .connections
+    let health: HealthModel
+    @State private var presentation: Presentation = .overview
     @State private var grouping: Grouping = .process
     @State private var unidentifiedOnly = false
     @State private var history = HistoryModel()
@@ -210,7 +231,8 @@ private struct MainView: View {
                     snapshot: nil,
                     history: client.history,
                     model: quality,
-                    waitingState: client.state
+                    waitingState: client.state,
+                    backToOverview: { presentation = .overview }
                 )
             } else if let snapshot = client.snapshot {
                 HeaderView(
@@ -221,6 +243,13 @@ private struct MainView: View {
                 Divider()
                 WarningsView(statistics: snapshot.statistics)
                 switch presentation {
+                case .overview:
+                    OverviewView(
+                        snapshot: snapshot,
+                        health: health,
+                        openQuality: { presentation = .quality },
+                        openConnections: { presentation = .connections }
+                    )
                 case .connections:
                     GroupingBar(
                         grouping: $grouping,
@@ -242,7 +271,8 @@ private struct MainView: View {
                         snapshot: snapshot,
                         history: client.history,
                         model: quality,
-                        waitingState: client.state
+                        waitingState: client.state,
+                        backToOverview: { presentation = .overview }
                     )
                 case .blocking, .history:
                     // Both handled above; neither needs a live snapshot.
@@ -292,21 +322,7 @@ private struct HistoryHeader: View {
 struct WaitingView: View {
     let state: FlowClient.State
 
-    /// The app bundle lives at `<project>/.build/Beholder.app`, so the project root is
-    /// two levels up. Showing the real path means the command can be pasted as-is
-    /// instead of being adjusted for wherever the user happens to be.
-    private var projectRoot: String? {
-        let root = Bundle.main.bundleURL
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        let makefile = root.appendingPathComponent("Makefile")
-        return FileManager.default.fileExists(atPath: makefile.path) ? root.path : nil
-    }
-
-    private var command: String {
-        guard let projectRoot else { return "make run" }
-        return "cd \(projectRoot) && make run"
-    }
+    private var command: String { ProjectCommand.make("run") }
 
     var body: some View {
         VStack(spacing: 16) {
@@ -353,21 +369,7 @@ struct WaitingView: View {
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 420)
 
-                HStack(spacing: 8) {
-                    Text(command)
-                        .font(.system(.caption, design: .monospaced))
-                        .textSelection(.enabled)
-                    Button {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(command, forType: .string)
-                    } label: {
-                        Image(systemName: "doc.on.doc")
-                    }
-                    .buttonStyle(.borderless)
-                    .help("Copy the command")
-                }
-                .padding(10)
-                .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+                CommandBox(command: command)
 
                 Text("This window connects on its own once the daemon is up.")
                     .font(.caption2)
