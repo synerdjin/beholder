@@ -33,6 +33,22 @@ public enum MCPVersion {
     }
 }
 
+/// Every result carries `resultType: "complete"`.
+///
+/// The 2026-07-28 revision requires it on each result, and a client on that revision
+/// refuses a `tools/list` without it ("missing required resultType") — the server connected
+/// fine and then showed no tools at all. Earlier revisions treat its absence as complete,
+/// and a client on either revision ignores an extra member it does not use, so it is added
+/// unconditionally rather than per revision: the per-revision branch is the thing this file
+/// is written to avoid. The value is the only one a complete, non-streamed answer can have.
+public enum MCPResult {
+    public static func complete(_ members: JSONValue) -> JSONValue {
+        guard case .object(var object) = members else { return members }
+        object["resultType"] = .string("complete")
+        return .object(object)
+    }
+}
+
 public enum MCPServerInfo {
     public static let name = "beholder"
     public static let version = "0.1.0"
@@ -230,7 +246,7 @@ public struct MCPHandler: Sendable {
 
         switch request.method {
         case "initialize":
-            return MCPResponse(id: id, result: identity(requestedBy: request))
+            return MCPResponse(id: id, result: MCPResult.complete(identity(requestedBy: request)))
 
         case "server/discover":
             // The 2026-07-28 revision made this the way a client learns what a server is
@@ -243,10 +259,12 @@ public struct MCPHandler: Sendable {
             return MCPResponse(id: id, result: .object(result))
 
         case "ping":
-            return MCPResponse(id: id, result: .object([:]))
+            return MCPResponse(id: id, result: MCPResult.complete([:]))
 
         case "tools/list":
-            return MCPResponse(id: id, result: ["tools": .array(definitions.map(\.json))])
+            return MCPResponse(
+                id: id,
+                result: MCPResult.complete(["tools": .array(definitions.map(\.json))]))
 
         case "tools/call":
             guard let name = request.params["name"]?.stringValue else {
@@ -266,7 +284,7 @@ public struct MCPHandler: Sendable {
                 )
             }
             let arguments = request.params["arguments"] ?? .object([:])
-            return MCPResponse(id: id, result: invoke(name, arguments).json)
+            return MCPResponse(id: id, result: MCPResult.complete(invoke(name, arguments).json))
 
         default:
             return MCPResponse(

@@ -50,6 +50,28 @@ struct MCPProtocolTests {
         }
     }
 
+    /// A client on the 2026-07-28 revision connects, asks for the tool list, and discards the
+    /// answer if a result lacks `resultType` — leaving a server that is "connected" and
+    /// offers nothing. Nothing in the unit tests noticed, because the field is not part of
+    /// any tool's content; only the client's own error ("missing required resultType") did.
+    @Test("Every kind of result says it is complete")
+    func resultsCarryResultType() {
+        let handler = makeHandler()
+        let requests = [
+            #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-07-28"}}"#,
+            #"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+            #"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"echo","arguments":{}}}"#,
+            #"{"jsonrpc":"2.0","id":4,"method":"ping"}"#,
+        ]
+        for request in requests {
+            let result = response(handler, request)?["result"] as? [String: Any]
+            #expect(result?["resultType"] as? String == "complete", "\(request)")
+        }
+        // The content is still where it was.
+        let list = response(handler, requests[1])?["result"] as? [String: Any]
+        #expect((list?["tools"] as? [[String: Any]])?.count == 1)
+    }
+
     @Test("An unknown or absent revision falls back to the preferred one")
     func fallsBackToPreferred() {
         let handler = makeHandler()
