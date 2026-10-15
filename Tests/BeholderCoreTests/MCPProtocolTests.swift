@@ -72,6 +72,22 @@ struct MCPProtocolTests {
         #expect((list?["tools"] as? [[String: Any]])?.count == 1)
     }
 
+    /// The second thing a 2026-07-28 client rejected a `tools/list` for. Both fields are
+    /// required on every list result, and an integer `ttlMs` must stay an integer — a client
+    /// validating with a strict number type refuses `0.0`.
+    @Test("A tool list carries the cache hints the newest revision requires")
+    func toolListCarriesCacheHints() throws {
+        let handler = makeHandler()
+        let line = try #require(
+            handler.handle(line: Data(#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#.utf8)))
+        let text = String(decoding: line, as: UTF8.self)
+        #expect(text.contains(#""ttlMs":0"#), "an integer, not 0.0: \(text.prefix(200))")
+        let result = try #require(
+            (try JSONSerialization.jsonObject(with: line) as? [String: Any])?["result"]
+                as? [String: Any])
+        #expect(result["cacheScope"] as? String == "private")
+    }
+
     @Test("An unknown or absent revision falls back to the preferred one")
     func fallsBackToPreferred() {
         let handler = makeHandler()

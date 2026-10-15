@@ -49,6 +49,26 @@ public enum MCPResult {
     }
 }
 
+extension MCPResult {
+    /// A list result: complete, and with the cache hints the 2026-07-28 revision requires on
+    /// every list. A client on that revision rejects a `tools/list` without `ttlMs` and
+    /// `cacheScope` — the same "connected, no tools" failure `resultType` caused, one layer
+    /// further in.
+    ///
+    /// `ttlMs: 0` because the list is a property of the *build*: a reinstalled server may
+    /// offer different tools, and a client holding a cached copy across that would show the
+    /// old set until the cache aged out, which looks exactly like the install not working.
+    /// A local list call costs nothing, so there is nothing to save by caching.
+    /// `private` because whether `cleartext_excerpts` exists depends on how this one
+    /// registration was started, which is not something to share between users.
+    public static func list(_ members: JSONValue) -> JSONValue {
+        guard case .object(var object) = complete(members) else { return members }
+        object["ttlMs"] = .integer(0)
+        object["cacheScope"] = .string("private")
+        return .object(object)
+    }
+}
+
 public enum MCPServerInfo {
     public static let name = "beholder"
     public static let version = "0.1.0"
@@ -263,8 +283,7 @@ public struct MCPHandler: Sendable {
 
         case "tools/list":
             return MCPResponse(
-                id: id,
-                result: MCPResult.complete(["tools": .array(definitions.map(\.json))]))
+                id: id, result: MCPResult.list(["tools": .array(definitions.map(\.json))]))
 
         case "tools/call":
             guard let name = request.params["name"]?.stringValue else {
